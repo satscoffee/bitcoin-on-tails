@@ -1,0 +1,16 @@
+# Bundled .deb directory.
+#
+# This folder ships a verified yad .deb (and any of its missing dependencies)
+# so the BoT control panel can be installed on a fresh Tails session without
+# requiring "Additional Software" persistence to be enabled first.
+#
+# The bundle is regenerated before each release by running
+# `tools/fetch-yad-deb.sh` on a Tails laptop. The expected layout is:
+#
+#     debs/
+#       yad_<version>_amd64.deb
+#       SHA256SUMS              # one line per .deb in this folder
+#
+# Both `persistent-setup` and `bot-menu` will look here on first run, verify
+# SHA256SUMS, and install via `apt-get install ./yad_*.deb` so dependency
+# resolution still happens through apt.

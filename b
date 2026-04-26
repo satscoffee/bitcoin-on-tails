@@ -103,11 +103,82 @@ else
       [[ "$b_target" == "$DOTFILES/"* ]] && already_installed=1
   fi
 
+  # Detect "BoT exists in Persistent Storage but I'm running b from somewhere
+  # else" (e.g., a developer working tree at ~/bitcoin-on-tails). The signal
+  # is a real install at $INSTALLED_BOT_DIR or a populated dist marker. When
+  # this fires we don't want to silently rerun the full first-install flow —
+  # we offer a refresh path that just syncs the working tree's scripts into
+  # Persistent Storage, no Bitcoin reinstall.
+  STATE_HOME_PROBE="${XDG_STATE_HOME:-$DOTFILES/.local/state}"
+  bot_already_setup=0
+  if ! ((already_installed)); then
+      if [ -x "$INSTALLED_BOT_DIR/b" ] || [ -s "$STATE_HOME_PROBE/bot/dist" ]; then
+          bot_already_setup=1
+      fi
+  fi
+
   if ((already_installed)); then
     # Already installed — just ensure persistence features are on, no migration.
     # shellcheck disable=SC1091
     . "$HOME/.profile"
     persistent-setup
+  elif ((bot_already_setup)); then
+    # Working-tree run on a stick that already has BoT installed. Don't force
+    # a full reinstall — let the user pick what they actually wanted.
+    dev_choice=$(zenity --list --radiolist \
+        --title="Bitcoin on Tails is already installed" \
+        --text="<b>BoT is already set up in your Persistent Storage.</b>\n\nYou ran <tt>b</tt> from a working tree at:\n<tt>$BOT_DIR</tt>\n\nWhat would you like to do?" \
+        --column="Pick" --column="Action" --column="Notes" \
+        TRUE  "refresh"   "Sync new scripts only — no Bitcoin download" \
+        FALSE "menu"      "Sync scripts, then open the BoT control panel" \
+        FALSE "reinstall" "Run the full install flow again (re-downloads Bitcoin)" \
+        --width=720 --height=320 \
+        "$ICON" --icon-name=bitcoin128) || exit 0
+    case "$dev_choice" in
+      refresh|menu)
+        # shellcheck disable=SC1091
+        . "$HOME/.profile"
+        # Make sure persistence is unlocked + Dotfiles feature active, otherwise
+        # the rsync below silently writes to a non-persistent path.
+        persistent-setup &
+        until /usr/local/lib/tpscli is-unlocked && \
+            /usr/local/lib/tpscli is-active Dotfiles && \
+            [ -d "$DOTFILES" ] && [ -w "$DOTFILES" ]; do
+            sleep 1
+        done
+        rsync -rvh "$BOT_DIR/overlay/" "$DOTFILES"
+        rsync -rvh "$BOT_DIR"/ "$INSTALLED_BOT_DIR"
+        link-dotfiles
+        wait
+        if [ "$dev_choice" = "menu" ]; then
+            exec bot-menu
+        fi
+        zenity --info --title="Scripts refreshed" \
+            --text="BoT scripts have been synced into Persistent Storage at <b>$VERSION</b>.\n\nFrom any terminal you can now test:\n<tt>b --check</tt>, <tt>b --update</tt>, <tt>b --uninstall</tt>, or <tt>bot-menu</tt>." \
+            --ellipsize "$ICON" --icon-name=bitcoin128
+        exit 0
+        ;;
+      reinstall)
+        # Fall through to the standard first-install flow below.
+        rsync -rvh "$BOT_DIR/overlay/" "$HOME"
+        # shellcheck disable=SC1091
+        . "$HOME/.profile"
+        (
+          persistent-setup &
+          until /usr/local/lib/tpscli is-unlocked && \
+            /usr/local/lib/tpscli is-active Dotfiles && \
+            [ -d "$DOTFILES" ] && [ -w "$DOTFILES" ]; do
+              sleep 1
+          done
+          rsync -rvh "$BOT_DIR/overlay/" "$DOTFILES"
+          rsync -rvh "$BOT_DIR"/ "$INSTALLED_BOT_DIR"
+          link-dotfiles
+        ) &
+        ;;
+      *)
+        exit 0
+        ;;
+    esac
   else
     # First-time install (running from a USB / Downloads extract).
     # Install Bitcoin on Tails to tmpfs

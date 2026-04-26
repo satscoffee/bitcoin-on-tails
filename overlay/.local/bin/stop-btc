@@ -1,9 +1,100 @@
 #!/bin/bash
-DATA_DIR='/live/persistence/TailsData_unlocked/Persistent/.bitcoin/'
-while pgrep bitcoin; do
-    printf '\033]2;Waiting for Bitcoin Core to shutdown...\a'
-    bitcoin-cli stop
-    [ -f $DATA_DIR/bitcoind.pid ] && kill "$(<$DATA_DIR/bitcoind.pid)"
-    pkill bitcoin
+#
+# stop-btc — graceful shutdown for bitcoind / bitcoin-qt with user feedback.
+#
+# Why a progress dialog: bitcoind can take 30-120 seconds to flush chainstate
+# and UTXO data on shutdown. Without a visible dialog the install/uninstall
+# flow looks frozen, and users sometimes try to force-quit, which risks
+# chainstate corruption. A pulsing zenity bar is enough signal that the work
+# is real and ongoing.
+#
+# Why not pgrep bitcoin: that substring-matches `bitcoin-cli` (which we spawn
+# inside the loop) and any leftover `bitcoin-qt` window, so the loop can
+# false-positive while there is no daemon to stop. We use `pgrep -x` against
+# an explicit list instead.
+###############################################################################
+
+set -u
+
+DATA_DIR="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bitcoin}"
+
+# Resolve a friendly label from the dist marker so the dialog reads
+# "Bitcoin Knots" for Knots installs instead of always "Bitcoin Core".
+STATE_HOME="${XDG_STATE_HOME:-/live/persistence/TailsData_unlocked/dotfiles/.local/state}"
+marker="$STATE_HOME/bot/dist"
+label="Bitcoin"
+if [ -s "$marker" ]; then
+    case "$(head -1 "$marker" | tr -d '[:space:]')" in
+        knots) label="Bitcoin Knots" ;;
+        core)  label="Bitcoin Core"  ;;
+    esac
+fi
+
+is_running() {
+    pgrep -x bitcoind   >/dev/null 2>&1 && return 0
+    pgrep -x bitcoin-qt >/dev/null 2>&1 && return 0
+    return 1
+}
+
+is_running || exit 0
+
+# Surface a progress dialog so the install flow doesn't look hung. Pipe stdin
+# closed via `--pulsate` and the trailing `&` so the dialog runs in parallel
+# with the shutdown loop. Track its PID so we can close it cleanly.
+icon_args=()
+[ -n "${ICON:-}" ] && icon_args+=("$ICON")
+(
+    while is_running; do printf '#\n'; sleep 1; done
+) | zenity --progress \
+        --title="Stopping $label" \
+        --text="Waiting for $label to finish writing to disk and shut down.\n\nThis can take 30 seconds to a few minutes if the chain is large. Please don't force-quit." \
+        --pulsate --auto-close --no-cancel \
+        "${icon_args[@]}" --icon-name=bitcoin128 \
+        2>/dev/null &
+zen_pid=$!
+
+# Terminal title fallback for headless invocation (no GUI session).
+printf '\033]2;Waiting for %s to shut down...\a' "$label"
+
+# Cap the loop so a wedged daemon can't pin us forever. Three minutes is
+# generous — typical chainstate flush is well under one. After timeout,
+# escalate to SIGTERM, then SIGKILL.
+TIMEOUT_SECS=180
+deadline=$(( $(date +%s) + TIMEOUT_SECS ))
+while is_running; do
+    # Polite path: RPC stop. Fails quickly and quietly if RPC is gone.
+    bitcoin-cli -datadir="$DATA_DIR" stop >/dev/null 2>&1 || true
+    # Belt: kill by pid file if present.
+    if [ -f "$DATA_DIR/bitcoind.pid" ]; then
+        pid="$(<"$DATA_DIR/bitcoind.pid")"
+        [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
+    fi
+    # Suspenders: SIGTERM any matching process by exact name.
+    pkill -x bitcoind   >/dev/null 2>&1 || true
+    pkill -x bitcoin-qt >/dev/null 2>&1 || true
+
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        # Force kill as a last resort. By this point we've SIGTERMed for 3
+        # minutes; if the daemon still hasn't exited, something is wedged.
+        pkill -9 -x bitcoind   >/dev/null 2>&1 || true
+        pkill -9 -x bitcoin-qt >/dev/null 2>&1 || true
+        sleep 1
+        if is_running; then
+            kill "$zen_pid" 2>/dev/null
+            wait "$zen_pid" 2>/dev/null
+            zenity --error --title="Could not stop $label" \
+                --text="$label did not respond to shutdown after $TIMEOUT_SECS seconds.\n\nYou may need to reboot Tails. If this happens repeatedly, the chainstate may be on slow storage or the daemon may be stuck — please report it." \
+                --ellipsize 2>/dev/null
+            exit 1
+        fi
+        break
+    fi
+
     sleep 1
 done
+
+# Make sure the progress dialog closes (--auto-close fires when the producer
+# pipe ends, but kill it explicitly in case of races).
+kill "$zen_pid" 2>/dev/null
+wait "$zen_pid" 2>/dev/null
+exit 0
