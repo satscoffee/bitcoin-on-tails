@@ -4,139 +4,121 @@
 
 <h1 align="center">Bitcoin on Tails</h1>
 
-<p align="center"><i>formerly known as "Bails" / fork of <a href="https://github.com/BenWestgate/Bails">CipherStick</a></i></p>
+<p align="center"><i>A Bitcoin full-node installer for <a href="https://tails.net/">Tails OS</a>.</i></p>
 
-Bitcoin on Tails is the most private way to transact and store bitcoin. It ensures your money is protected from surveillance, censorship, and confiscation, leaving no trace of your Bitcoin use on the computer or the Internet. Combining Bitcoin Core and Tails, Bitcoin on Tails offers strong anonymity for transactions and secure encrypted storage.
+Bitcoin on Tails (BoT) is a small set of bash scripts that install and update a Bitcoin full node — Bitcoin Core or Bitcoin Knots — on Tails, with Sparrow Wallet as an optional add-on. Releases are downloaded over Tor, verified against pinned signing keys, and installed into Tails Persistent Storage so your node and wallets survive reboot.
 
-## Bitcoin Core on Tails
+BoT does not generate seeds, design backup schemes, or pick wallet policies for you. It installs the upstream software, gets it talking to your local node over `localhost`, and otherwise stays out of the way.
 
-Bitcoin Core and Tails are relied upon by millions to safeguard their online privacy and security, particularly in sensitive and high-risk situations. This repository provides a script to install Bitcoin Core on Tails and create a wallet backup.
+## What it installs
 
-Bitcoin Core connects to the Bitcoin network to download and validate blocks and transactions, featuring a user-friendly interface and built-in wallet.
-- [Bitcoin Core :: About](https://bitcoincore.org/en/about/)
+- **Bitcoin Core** or **Bitcoin Knots** — pick one at install time. Both are full-node implementations; Knots is Luke Dashjr's fork with extra relay policy options.
+- **Sparrow Wallet** (optional) — desktop Bitcoin wallet that talks to your local Core/Knots node over RPC, so wallet queries never leak to a third-party Electrum server.
 
+Everything runs inside Tails, so all network traffic goes through Tor by default.
 
-Tails is a portable operating system that defends against surveillance and censorship, exclusively utilizing the Tor anonymity network.
-- [Tails - How Tails works](https://tails.net/about/index.en.html)
+## How verification works
 
+Every release is verified before it's installed. There is no curl-pipe-bash, no anonymous mirror.
 
-## Why use Bitcoin Core?
+- **Bitcoin Core** — multi-signer verification against [bitcoin-core/guix.sigs](https://github.com/bitcoin-core/guix.sigs). The installer requires at least 3 valid signatures from the published builders for the exact release file before unpacking it.
+- **Bitcoin Knots** — single-signer verification against Luke Dashjr's PGP key, matching the publication model upstream uses.
+- **Sparrow Wallet** — single-signer verification against Craig Raw's pinned PGP fingerprint, fetched from cache, Keybase, GitHub, or a keyserver and double-checked against the value baked into the script.
 
-### Full Validation
+If signature verification fails, the install stops and tells you why.
 
-Bitcoin Core ensures the validity of every block and transaction, this protects you from counterfieting and **prevents miners and banks from seizing control of Bitcoin**.
+## What lives where
 
-[Learn about full validation](https://bitcoin.org/en/bitcoin-core/features/validation)
+Tails wipes everything on shutdown except what's inside Persistent Storage. BoT puts the stuff that needs to persist there:
 
-### Excellent Privacy
+- `~/Persistent/.bitcoin/` — chain data, wallets, `bitcoin.conf`
+- `~/.local/share/bot/` — installer source, used for in-place `git pull` updates
+- `dotfiles/` — autostart entries, desktop icons, and the wrappers BoT drops into `PATH`
 
-Bitcoin Core provides **exclusive privacy features**, making it challenging for anyone to link your transactions to you.
+The first run helps you turn on Persistent Storage and the right TPS features (Dotfiles, Persistent Folder) if they aren't already on.
 
-[Discover the privacy advantages](https://bitcoin.org/en/bitcoin-core/features/privacy)
+## Tools shipped in `PATH`
 
-# How to Install
+- `b` — top-level installer / updater. Run with no arguments to install or update; pass `--version` to print the BoT version.
+- `bot-menu` — yad-based control panel. Status, About, and (in progress) Update / Uninstall tabs.
+- `install-core`, `install-knots`, `install-sparrow` — standalone installers for each component.
+- `bot-backup` — wraps `tails-installer --backup` to clone your stick to a second USB.
+- `ibd-progress` — tiny progress reporter for initial block download.
+- `stop-btc` — graceful `bitcoind` shutdown.
 
-## You need
-- **1 USB stick** or memory card, 32 GB minimum
-    - If you need a USB stick, see our [recommended USB sticks](https://github.com/BenWestgate/Bails/blob/master/docs/FAQ.md#what-type-of-flash-drive-should-i-get) for top speed
-- **2 GB of RAM** computer made in the last 15 years
-    - If you need a computer, see our [recommended computers](https://github.com/BenWestgate/Bails/blob/master/docs/FAQ.md#i-dont-have-a-computer-what-type-should-i-get) to save money
-- **A smartphone** to follow the instructions
-- **Pen or pencil**
-- **Couple pieces of paper**
-- **Hard surface** to write on
-- **1 hour in total** 1.4 GB to download, ½ hour to install Tails, ¼ hour to setup Bitcoin on Tails
+## Install
 
-## Your steps
+### You need
 
-First, open these instructions on another device. 
+- A USB stick of at least 32 GB
+- A computer with at least 2 GB of RAM that can boot from USB
+- About an hour: ~30 min to install Tails, ~15 min for BoT, the rest is download
+- Enough free space for the Bitcoin blockchain (currently several hundred GB)
 
-![image](https://user-images.githubusercontent.com/73506583/203773811-b157925d-404f-4b91-bd86-6d2e6b454a59.png)
+### Steps
 
-In the next steps, you will shut down the computer. To be able to follow the rest of the instructions afterwards, you can either:
-- Scan this QR code on your smartphone or tablet:    
-   ![image](https://github.com/BenWestgate/Bails/assets/73506583/72496200-fa4f-4ce3-94de-06cc88296e73)
-- Print these instructions on paper.
-- Take note of the URL of this page:
+1. **[Install Tails](https://tails.net/install/index.en.html)** to your USB stick.
+2. **[Boot Tails](https://tails.net/doc/first_steps/start/index.en.html).** At the Welcome Screen, skip Persistent Storage for now — BoT will help you set it up.
+3. **Connect to a network** and **[connect to Tor](https://tails.net/doc/anonymous_internet/tor/index.en.html)**.
+4. Open **Applications → Utilities → Terminal** and run:
+
+   ```bash
+   git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot && ~/bot/b
    ```
-   https://github.com/benwestgate/bails#install-steps
-   ```
 
-### Install steps
+5. When prompted, pick **Bitcoin Core** or **Bitcoin Knots**, then optionally install Sparrow Wallet.
+6. Let initial block download finish. Lock the screen with `❖+L` if you step away.
 
-1. [Install Tails](https://tails.net/install/index.en.html) to a USB stick or memory card (minimum 32 GB of capacity).
-   - If you know someone you trust who uses Bitcoin on Tails already, you can [install by cloning](https://github.com/BenWestgate/Bails/tree/master) their Bitcoin on Tails.
-1. [Start Tails](https://tails.net/doc/first_steps/start/index.en.html).
-   - At the [Welcome Screen](https://tails.net/doc/first_steps/welcome_screen/index.en.html), ignore "Create Persistent Storage" and click "Start Tails".
-     - Bitcoin on Tails will help you set up Persistent Storage later.
-   - If you installed by cloning from another Bitcoin on Tails, enter your temporary [Persistent Storage](https://tails.net/doc/first_steps/welcome_screen/index.en.html#index3h1) passphrase, click "Unlock Encryption", and then click "Start Tails".
-1. [Connect to a local network](https://tails.net/doc/anonymous_internet/networkmanager/index.en.html#index1h1).
-1. [Connect to Tor](https://tails.net/doc/anonymous_internet/tor/index.en.html) when the _Tor Connection_ window appears.
-   - If you cloned Bitcoin on Tails, skip to step 7.
-1. Open a terminal. Choose **Applications** ▸ **Utilities** ▸ **Terminal**.
-1.  Type or Paste the following in Terminal, then press Enter:
-    ```bash
-    git clone https://github.com/benwestgate/bails; */b
-    ```
-    ![image](https://github.com/BenWestgate/Bails/assets/73506583/0522b2fe-5f7e-4548-a74e-e78ce6c52c53)
-1. Follow the instructions on Screen.
-1. You're Done!
-   - [Share your feedback, questions and suggestions](https://github.com/BenWestgate/Bails/issues/new) to make Bitcoin on Tails even better!
-   
-### Bitcoin on Tails is [shareware](https://en.wikipedia.org/wiki/Samizdat).
+### Updating
 
-- To share this free open-source software with family and friends, choose **Applications** ▸ **Office** ▸ **Bitcoin on Tails** ▸ **Clone**.
+Run `b` again. It detects an existing install and updates in place.
 
-#### Why clone Bitcoin on Tails sticks?
+## Status
 
-- Sharing hand-to-hand prevents censorship and surveillance.
-- Cloning Bitcoin on Tails saves them considerable setup time and boosts your backup resillience. A win-win situation!
+BoT is currently **alpha**. The installer flow, release verification, and Persistent Storage integration are working. The control panel (`bot-menu`) ships a Status tab and About tab; Update / Uninstall actions are being wired up next. Expect rough edges, and please file issues.
 
-# Support resources
+See [`docs/FAQ.md`](docs/FAQ.md) and [`docs/Advantages_and_Disadvantages.md`](docs/Advantages_and_Disadvantages.md) for more.
 
-For support and discussion join our [telegram channel](https://t.me/bails_support).
+## Verifying releases
 
-For more reading checkout our [Frequently Asked Questions](docs/FAQ.md).
+Release tags and commits are signed by the BoT signing key:
 
-To contact Ben Westgate by email `benwestgate@protonmail.com`.
+```
+2EE3 5C29 41D5 4C9E 9E2D  C908 33A3 9346 82DD 9E18
+```
 
-## Advantages and Disadvantages
+UID: `Satoshi Coffee Co. <hey@sats.coffee>`. You can fetch it from a keyserver or from `https://sats.coffee/2EE35C2941D54C9E9E2DC90833A3934682DD9E18.asc` and verify a tag with:
 
-For a discussion on the pros and cons of using Bitcoin on Tails, refer to the [detailed document](docs/Advantages_and_Disadvantages.md). It describes the unique features and limitations of the Bitcoin on Tails platform.
+```bash
+git tag -v v0.7.3-alpha
+```
 
-### Bitcoin on Tails is the First Codex32-enabled (BIP93) Wallet
+## Issues and feedback
 
-Find more information on [Codex32](https://secretcodex32.com/index.html) and [BIP93](https://github.com/bitcoin/bips/blob/master/bip-0093.mediawiki).
+File issues at <https://github.com/satscoffee/bitcoin-on-tails/issues>.
 
-### Compliant with Auditable Bitcoin Wallets Standard
+## License
 
-Refer to the [Auditable Bitcoin Wallets Standard](https://github.com/oleganza/bitcoin-papers/blob/master/AuditableBitcoinWallets.md) for compliance details. All necessary information for auditing is displayed by the terminal.
+MIT — see [`LICENSE`](LICENSE).
 
-## Source Code Headers
+```
+Copyright (c) 2026 Satoshi Coffee Co.
 
-Every file containing source code must include copyright and license
-information. This includes any JS/CSS files that you might be serving out to
-browsers. (This is to help well-intentioned people avoid accidental copying that
-doesn't comply with the license.)
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-MIT header:
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
 
-    Copyright (c) 2025 Ben Westgate
-    
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-    
-    The above copyright notice and this permission notice shall be included in
-    all copies or substantial portions of the Software.
-    
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-    THE SOFTWARE.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
