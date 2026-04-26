@@ -1,0 +1,147 @@
+#!/bin/bash
+
+# Copyright (c) 2023 Ben Westgate
+# Copyright (c) 2026 Bitcoin on Tails contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+###############################################################################
+# install-core: thin wrapper that presents a version picker for Bitcoin Core
+# and delegates the download / verify / install flow to bitcoin-install-common.
+###############################################################################
+
+# Source env and helper functions
+# shellcheck source=/dev/null
+. bitcoin-install-common --funcs-only
+
+# Distribution-specific constants
+export DOMAIN="https://bitcoincore.org"
+export DIST_LABEL="Bitcoin Core"
+export DIST_SLUG="core"
+export BINVERIFY_MIN_GOOD_SIGS=3
+readonly GUIX_SIGS_REPO_URL="https://github.com/bitcoin-core/guix.sigs"
+
+printf '\033]2;Checking for available Bitcoin Core versions\a'
+pkill tca &>/dev/null # Close tor connection assistant
+
+# Download to Persistent Storage if setup, otherwise amnesia
+cd "$XDG_DATA_HOME/bitcoin" 2>/dev/null || cd "$HOME/.local/share/bitcoin" || exit 1
+export DOWNLOAD_DIR="$PWD"
+
+# Scrape /bin/ index for every published bitcoin-core-X.Y[.Z] directory
+rm -f bin-index
+retry_on_fail wget -O bin-index "$DOMAIN/bin/"
+
+mapfile -t ALL_VERSIONS < <(
+    grep -oE 'bitcoin-core-[0-9]+(\.[0-9]+)+/' bin-index \
+    | sed -E 's|^bitcoin-core-||; s|/$||' \
+    | sort -V -u
+)
+
+if ((${#ALL_VERSIONS[@]} == 0)); then
+    zenity --error --title="No versions found" --text="Could not parse any Bitcoin Core versions from $DOMAIN/bin/\n\nCheck your network and try again." --ellipsize "$ICON"
+    exit 1
+fi
+
+# Group by major, pick latest patch per line
+declare -A LATEST_PATCH
+for v in "${ALL_VERSIONS[@]}"; do
+    major="${v%%.*}"
+    if [[ -z "${LATEST_PATCH[$major]}" ]] || \
+       [[ "$(printf '%s\n%s' "$v" "${LATEST_PATCH[$major]}" | sort -V | tail -1)" == "$v" ]]; then
+        LATEST_PATCH[$major]="$v"
+    fi
+done
+
+# Take the 5 highest major lines
+mapfile -t TOP_MAJORS < <(printf '%s\n' "${!LATEST_PATCH[@]}" | sort -n | tail -5 | tac)
+
+# Build zenity radiolist args — no default selection
+radiolist_args=()
+for m in "${TOP_MAJORS[@]}"; do
+    radiolist_args+=("FALSE" "${LATEST_PATCH[$m]}" "Latest patch of the $m.x release line")
+done
+radiolist_args+=("FALSE" "__custom__" "Enter a specific version number")
+
+selected=$(zenity --list --radiolist \
+    --title="Choose a Bitcoin Core version" \
+    --text="<b>No default selected — please pick a version to install.</b>" \
+    --column="Pick" --column="Version" --column="Description" \
+    "${radiolist_args[@]}" \
+    --width=560 --height=360 \
+    "$ICON" --icon-name=bitcoin128) || exit 1
+
+if [ -z "$selected" ]; then
+    zenity --error --title="No version selected" --text="You must choose a Bitcoin Core version to install." --ellipsize "$ICON"
+    exit 1
+fi
+
+if [ "$selected" = "__custom__" ]; then
+    while true; do
+        custom=$(zenity --entry \
+            --title="Custom Bitcoin Core version" \
+            --text="Enter the exact Bitcoin Core version string (e.g., 27.1):" \
+            "$ICON" --icon-name=bitcoin128) || exit 1
+        # Validate basic shape first to avoid malformed URLs
+        if ! [[ "$custom" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+            zenity --error --title="Invalid format" --text="Version must look like '27.1' or '27.0.1'." --ellipsize "$ICON"
+            continue
+        fi
+        # Probe the release directory for SHA256SUMS.asc
+        if retry=0 && wget --timeout=30 --tries=2 --spider "$DOMAIN/bin/bitcoin-core-$custom/SHA256SUMS.asc" 2>/dev/null; then
+            VER="$custom"
+            break
+        fi
+        zenity --error --title="Version not found" --text="No release directory at $DOMAIN/bin/bitcoin-core-$custom/\n\nDouble-check the version number and try again." --ellipsize "$ICON"
+    done
+else
+    VER="$selected"
+fi
+export VER
+
+# Distribution-specific download URLs
+export TAR_NAME="bitcoin-$VER-x86_64-linux-gnu.tar.gz"
+export TAR_URL="$DOMAIN/bin/bitcoin-core-$VER/$TAR_NAME"
+export SIGS_URL="$DOMAIN/bin/bitcoin-core-$VER/SHA256SUMS"
+
+# Populate builder-keys via guix.sigs (Core's multi-signer attestation mechanism)
+printf '\033]2;Getting Bitcoin Core builder keys...\a'
+cd "$DOWNLOAD_DIR" || exit 1
+if cd guix.sigs 2>/dev/null; then
+    retry_on_fail git pull -v
+    cd "$DOWNLOAD_DIR" || exit 1
+else
+    retry_on_fail git clone $GUIX_SIGS_REPO_URL --depth=1
+fi
+
+# Prune guix.sigs dirs that don't match our target version
+for dir in guix.sigs/*/; do [ "${dir#*/}" == "$VER/" ] && break; rm -rf "$dir"; done
+# Build the builder-keys file from each signer's key in guix.sigs/builder-keys/
+for name in guix.sigs/"$VER"/*; do
+    gpg --show-keys "${name/"$VER"/builder-keys}.gpg"
+done > builder-keys
+
+if [ ! -s builder-keys ]; then
+    zenity --error --title="No builder keys found" --text="No guix.sigs attestations were found for Bitcoin Core $VER.\n\nThis version may not yet have multi-party attestation. Pick a different version or try again later." --ellipsize "$ICON"
+    exit 1
+fi
+
+# Hand off to the shared install flow
+# shellcheck source=/dev/null
+. bitcoin-install-common

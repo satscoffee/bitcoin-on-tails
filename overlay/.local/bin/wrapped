@@ -1,0 +1,67 @@
+#!/bin/bash
+# Copyright (c) 2023 Ben Westgate
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+###############################################################################
+# wraps Bitcoin executables with datadir symlinks, favorites, prune, dbcache.
+###############################################################################
+export WAYLAND_DISPLAY=""
+export ICON="--window-icon=$HOME/.local/share/icons/bot128.png"
+export DATA_DIR=/live/persistence/TailsData_unlocked/Persistent/.bitcoin
+
+# shellcheck disable=SC1090
+. "/home/$USER/.profile"
+persistent-setup # Checks needed persistent features are on.
+# Symlink at default datadir to our custom datadir
+ln -s /live/persistence/TailsData_unlocked/Persistent/.* ~
+
+# Update favorite apps list
+
+favorites="['bitcoin-qt.desktop', 'sparrow-Sparrow.desktop', 'bot-menu.desktop', 'tor-browser.desktop', 'tca.desktop', 'org.boum.tails.PersistentStorage.desktop', 'tails-documentation.desktop', 'tails-installer.desktop', 'thunderbird.desktop', 'org.keepassxc.KeePassXC.desktop', 'org.kde.kleopatra.desktop']"
+# Drop Sparrow from the dash if it isn't installed.
+which Sparrow >/dev/null 2>&1 || favorites="${favorites/'sparrow-Sparrow.desktop', /}"
+gsettings set org.gnome.shell favorite-apps "$favorites"
+
+space=$(( ($(df --output=avail "$DATA_DIR" | tail -1) + \
+  $(du --summarize "$DATA_DIR/blocks" | cut -f1))/1024 - 10240 ))
+space=$(( space > 1907 ? space : 1907 ))
+old_prune=$(grep '"prune":' "$DATA_DIR/settings.json" | cut -d\" -f4)
+if ((space < old_prune)); then # Reduce prune as needed to not run out of space
+    sed -i 's/"prune": "'"$old_prune"'/"prune": "'$space/ "$DATA_DIR/settings.json"
+fi
+# Warn if prune is off and space is low
+if ((old_prune == 0)) && (( $(df --output=avail "$DATA_DIR" | tail -1) < 10**7 )); then
+    zenity --warning --title="Disk Space Low" --text='Less than 10 GB available space remains on your USB Stick.\n\nConsider enabling pruning in <b>Bitcoin Core>Settings>Options</b> to avoid running out of space.' "$ICON"
+fi
+
+old_dbcache=$(grep '"dbcache":' "$DATA_DIR/settings.json" | cut -d\" -f4)
+
+if [ -z "$old_dbcache" ]; then
+    last_run=$(find $DATA_DIR/blocks -exec stat -c "%Y %n" {} + | grep blk | sort -nr | head -n1 | awk '{print $1}')
+    if ((last_run < $(date -d "2 weeks ago" +%s))); then # Add dbcache setting
+        sed -i '2a\    "dbcache": "450",' settings.json
+        old_dbcache=450
+    fi
+fi
+# If set, change dbcache to available memory minus 2 GiB
+new_dbcache=$(( $(grep Available /proc/meminfo | sed s/[^0-9]//g)/1024 - 2048 ))
+sed -i 's/"dbcache": "'"$old_dbcache"'/"dbcache": "'$new_dbcache/ "$DATA_DIR/settings.json"
+
+"$@" &

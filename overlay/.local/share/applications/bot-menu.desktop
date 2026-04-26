@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Name=Bitcoin on Tails
+Comment=Manage your Bitcoin node, wallet, and storage settings
+Exec=/live/persistence/TailsData_unlocked/dotfiles/.local/bin/bot-menu
+Terminal=false
+Type=Application
+Icon=bot128
+Categories=Finance;Network;Settings;
+StartupWMClass=Yad
+SingleMainWindow=true

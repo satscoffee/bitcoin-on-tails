@@ -1,0 +1,171 @@
+#!/bin/bash
+
+# Copyright (c) 2026 Bitcoin on Tails contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+###############################################################################
+# install-knots: thin wrapper that always installs the latest Bitcoin Knots
+# release from bitcoinknots.org, delegating to bitcoin-install-common.
+#
+# Bitcoin Knots is signed by Luke Dashjr. His key is fetched from a public
+# keyserver at install time (not bundled in this repo), with single good
+# signature required for verification.
+###############################################################################
+
+# Source env and helper functions
+# shellcheck source=/dev/null
+. bitcoin-install-common --funcs-only
+
+# Distribution-specific constants
+export DOMAIN="https://bitcoinknots.org"
+export DIST_LABEL="Bitcoin Knots"
+export DIST_SLUG="knots"
+export BINVERIFY_MIN_GOOD_SIGS=1
+export SINGLE_SIGNER=1  # Signals the common body to skip multi-signer UI branches
+
+# Primary source for Luke Dashjr's public key — GitHub serves user keys over
+# plain HTTPS, which is far more reliable than hkps keyservers over Tor.
+#
+# We do not hardcode a fingerprint. Trust anchor is the luke-jr GitHub account
+# (HTTPS-pinned by CA + HSTS); the authoritative gate is downstream
+# `gpg --verify SHA256SUMS.asc SHA256SUMS`, which will fail loudly if GitHub
+# ever serves a key that doesn't sign the release manifest.
+readonly KNOTS_KEY_URL='https://github.com/luke-jr.gpg'
+
+printf '\033]2;Checking for latest Bitcoin Knots release\a'
+pkill tca &>/dev/null
+
+# Download directory — shared with Core since binaries install to the same place
+cd "$XDG_DATA_HOME/bitcoin" 2>/dev/null || cd "$HOME/.local/share/bitcoin" || exit 1
+export DOWNLOAD_DIR="$PWD"
+
+# Scrape bitcoinknots.org/files/ for the major release lines
+rm -f knots-index
+retry_on_fail wget -O knots-index "$DOMAIN/files/"
+
+# Parse "NN.x/" directory entries; pick the highest major line
+mapfile -t KNOTS_MAJORS < <(
+    grep -oE 'href="[0-9]+\.x/"' knots-index \
+    | sed -E 's|href="||; s|/?"$||' \
+    | sort -V -u
+)
+
+if ((${#KNOTS_MAJORS[@]} == 0)); then
+    zenity --error --title="No Knots versions found" --text="Could not parse any release directories from $DOMAIN/files/\n\nCheck your network and try again." --ellipsize "$ICON"
+    exit 1
+fi
+
+LATEST_MAJOR="${KNOTS_MAJORS[-1]}"
+
+# Now scrape that major's subdir for the latest specific release
+rm -f knots-major-index
+retry_on_fail wget -O knots-major-index "$DOMAIN/files/$LATEST_MAJOR/"
+
+mapfile -t KNOTS_RELEASES < <(
+    grep -oE 'href="[0-9]+\.[0-9]+(\.[0-9]+)?\.knots[0-9]{8}/"' knots-major-index \
+    | sed -E 's|href="||; s|/?"$||' \
+    | sort -V -u
+)
+
+if ((${#KNOTS_RELEASES[@]} == 0)); then
+    zenity --error --title="No Knots releases found" --text="Could not parse any dated releases under $DOMAIN/files/$LATEST_MAJOR/\n\nCheck your network and try again." --ellipsize "$ICON"
+    exit 1
+fi
+
+VER="${KNOTS_RELEASES[-1]}"
+export VER
+
+# Distribution-specific download URLs
+export TAR_NAME="bitcoin-$VER-x86_64-linux-gnu.tar.gz"
+export TAR_URL="$DOMAIN/files/$LATEST_MAJOR/$VER/$TAR_NAME"
+export SIGS_URL="$DOMAIN/files/$LATEST_MAJOR/$VER/SHA256SUMS"
+
+cd "$DOWNLOAD_DIR" || exit 1
+
+# Key cache location in persistence — after first successful fetch we use the
+# cached copy instead of hitting GitHub each install/update. Removes runtime
+# dependency on GitHub for every install beyond the first.
+: "${DOTFILES:=/live/persistence/TailsData_unlocked/dotfiles}"
+KEY_CACHE_DIR="$DOTFILES/.local/share/bitcoin/trusted-keys"
+KEY_CACHE_FILE="$KEY_CACHE_DIR/luke-jr.gpg"
+mkdir -p "$KEY_CACHE_DIR" 2>/dev/null
+
+# Prefer cached key over GitHub fetch. Falls through to GitHub if cache missing
+# or empty.
+if [ -s "$KEY_CACHE_FILE" ]; then
+    cp "$KEY_CACHE_FILE" luke-jr.asc
+    printf '\033]2;Using cached Luke Dashjr signing key...\a'
+else
+    # First install (or cache wiped): fetch from GitHub over HTTPS (works reliably
+    # through Tor, unlike hkps keyservers) and cache for future installs.
+    printf '\033]2;Fetching Luke Dashjr signing key from GitHub...\a'
+    retry_on_fail curl -sL --fail --max-time 30 -o luke-jr.asc "$KNOTS_KEY_URL"
+    # Cache the key for next time. Ignore errors (e.g. persistence not yet
+    # writable) — we'll re-fetch next run if the cache didn't land.
+    cp luke-jr.asc "$KEY_CACHE_FILE" 2>/dev/null || true
+fi
+
+# Extract the primary fingerprint(s) from the key we just downloaded, BEFORE
+# importing into the keyring. This way builder-keys reflects whatever GitHub
+# currently serves for luke-jr, and if the key rotates upstream we don't need
+# a BoT release to track it.
+mapfile -t KNOTS_FINGERPRINTS < <(
+    gpg --show-keys --with-colons --with-fingerprint luke-jr.asc 2>/dev/null \
+    | awk -F: '$1=="fpr" && !seen[$10]++ {print $10}'
+)
+if ((${#KNOTS_FINGERPRINTS[@]} == 0)); then
+    zenity --error --title="Could not parse Knots signing key" \
+        --text="Downloaded $KNOTS_KEY_URL but GPG could not extract a fingerprint from it.\n\nThe file may be corrupted or GitHub may have served something unexpected. Try again, or check your network." \
+        --ellipsize "$ICON" --icon-name=dialog-error
+    rm -f luke-jr.asc
+    exit 1
+fi
+
+# Import the key so later gpg --verify can use it. Idempotent if already present.
+gpg --import luke-jr.asc &>/dev/null
+rm -f luke-jr.asc
+
+# Populate builder-keys with whatever fingerprint(s) the key carries. The common
+# body uses this file to know which fingerprints count as valid signers.
+: > builder-keys
+for fp in "${KNOTS_FINGERPRINTS[@]}"; do
+    printf '      Key fingerprint = %s\n' "$fp" >> builder-keys
+done
+
+# Confirm the selection with the user before committing to download. Show the
+# actual fingerprint(s) so the user can eyeball-compare against Luke's other
+# public locations (bitcoinknots.org, his mastodon/twitter, etc.) if they care.
+FP_DISPLAY=$(printf '<tt>%s</tt>\n' "${KNOTS_FINGERPRINTS[@]}")
+if [ -s "$KEY_CACHE_FILE" ] && ! [ luke-jr.asc -nt "$KEY_CACHE_FILE" ]; then
+    KEY_SOURCE_DISPLAY="local cache ($KEY_CACHE_FILE)"
+else
+    KEY_SOURCE_DISPLAY="$KNOTS_KEY_URL"
+fi
+if ! zenity --question \
+    --title="Confirm Bitcoin Knots install" \
+    --text="Bitcoin Knots <b>$VER</b>\n\nSigned by Luke Dashjr (single signature required).\nKey fingerprint from $KEY_SOURCE_DISPLAY:\n$FP_DISPLAY\nProceed with download and installation?" \
+    --ok-label="Install" --cancel-label="Cancel" \
+    "$ICON" --icon-name=bitcoin128; then
+    exit 1
+fi
+
+# Hand off to the shared install flow
+# shellcheck source=/dev/null
+. bitcoin-install-common

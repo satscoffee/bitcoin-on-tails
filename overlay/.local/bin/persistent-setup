@@ -1,0 +1,220 @@
+#!/bin/bash
+
+# Copyright (c) 2023 Ben Westgate
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+###############################################################################
+# Tails Persistent Storage Setup Tutorial
+###############################################################################
+
+# For security reviewing this use: https://explainshell.com/ for commands that are unclear.
+export XDG_STATE_HOME="/live/persistence/TailsData_unlocked/dotfiles/.local/state"
+SET_UP="$XDG_STATE_HOME/tps_is_set_up"
+
+# Check if user password is already set
+passwd_unset=$(passwd -S "$USER" | grep -c NP)
+
+# Display welcome message
+[ -f $SET_UP ] || zenity --title='Welcome to Bitcoin on Tails' --info \
+    --text="Thank you for choosing Bitcoin on Tails, a self-custodial Bitcoin wallet and full node.\n\nDuring this initial setup process, we will guide you through the necessary steps\nto ensure a smooth experience. Let's get started!" \
+    --no-wrap --ok-label='Continue' "$ICON" --icon-name=bot128
+
+# First-time setup: Persistent Storage not yet unlocked
+if ! /usr/local/lib/tpscli is-unlocked; then
+    printf '\033]2;Setup the Persistent Storage\a'
+    # Choose passphrase
+    zenity --warning --title='Choose a strong passphrase' --no-wrap "$ICON" \
+        --text='It is important to select a strong passphrase to protect your Bitcoin data.\n
+We recommend using a suggested passphrase from the Persistent Storage dialog.' \
+        --ok-label='I Will Use a Suggested Passphrase' --icon-name=tails-persistent-storage
+    zenity --warning --title='Write your passphrase down' "$ICON" \
+        --text='It is impossible to recover your passphrase if you forget it!\n
+To help you remember, write it on paper, seal in an envelope, secure it for a few days in a place like a safe or your wallet, then destroy it once you know it well.\n
+Write on a hard surface to avoid leaving an imprint of the secret.' \
+        --ok-label='I Will Write My Passphrase Down' --icon-name=org.gnome.TextEditor
+    # Persistent storage creation
+    until /usr/local/lib/tpscli is-unlocked; do
+        sleep 12
+        notify-send --icon=bot128 'Important: Click ↻ or choose the suggested passphrase.' 'To help remember:\n\nCreate a mental image or mnemonic using the words, in order.\nIt might be a story, scenario, or sentence that you can remember and that reminds you of the particular passphrase you chose.'
+    done & notifying+=($!)
+
+    until /usr/local/lib/tpscli is-unlocked; do
+        grep --count 'python3 /usr/local/lib/tps-frontend' <<< "$(ps -ef)" - >/dev/null ||
+            { tails-persistent-storage & notify-send --icon=tails-persistent-storage 'Click Continue to create a Persistent Storage'; }
+        sleep 1
+    done
+
+    # Clear notifications
+    kill "${notifying[@]}" &>/dev/null
+fi
+
+# Display memorization tips
+if ((passwd_unset)) && ! [ -f "$SET_UP" ]; then
+    zenity --info --title='Tips for your new passphrase' \
+            --text="Keep your passphrase safe, DO NOT:
+     • share it with anyone,
+     • give it when someone emails, calls, or messages,
+     • photograph it,
+     • re-use for any other account, or type it outside of Bitcoin on Tails.
+
+    DO:
+     • be mindful of whether you can be seen or recorded typing,
+     • immediately change it when you suspect it is compromised,
+     • store it out of sight away from your Bitcoin on Tails sticks, and
+     • destroy it once memorized." \
+            --ok-label='I Will Destroy It Once Memorized' "$ICON"
+fi
+
+# Check features of the Persistent Storage
+if /usr/local/lib/tpscli is-active PersistentDirectory && \
+    /usr/local/lib/tpscli is-active GnuPG && \
+    /usr/local/lib/tpscli is-active Dotfiles; then
+        :
+else
+    grep --count 'python3 /usr/local/lib/tps-frontend' <<< "$(ps -ef)" - >/dev/null ||
+        { tails-persistent-storage & notify-send --icon=tails-persistent-storage 'You must turn on needed features of the Persistent Storage.'; }
+
+    zenity --info --title='Features of the Persistent Storage' \
+        --text='In the Persistent Storage application below, scroll and click each toggle to turn on these necessary features:\n\n  • Persistent Folder\n  • Network Connections\n  • GnuPG\n  • Dotfiles\n\n(SSH Client is <b>not</b> required.)' \
+        --icon-name=tails-persistent-storage "$ICON" --no-wrap &
+    sleep 4
+fi
+until /usr/local/lib/tpscli is-active PersistentDirectory && \
+    /usr/local/lib/tpscli is-active GnuPG && \
+    /usr/local/lib/tpscli is-active Dotfiles; do
+    grep --count 'python3 /usr/local/lib/tps-frontend' <<< "$(ps -ef)" - >/dev/null ||
+        { tails-persistent-storage & notify-send --icon=tails-persistent-storage 'You must turn on needed features of the Persistent Storage.'; }
+    {
+        /usr/local/lib/tpscli is-active PersistentDirectory ||
+            { zenity --notification --text='Persistent Folder must be toggled on.' --window-icon=folder --timeout=6; false; }
+    } &&
+        {
+            /usr/local/lib/tpscli is-active NetworkConnections ||
+                { ((i++ < 5)) && zenity --notification --text='Toggle on "Network Connections".\nThis will remember your Wi-Fi.' --window-icon=gnome-dev-ethernet --timeout=6; true; }
+        } &&
+        {
+            /usr/local/lib/tpscli is-active GnuPG ||
+                { zenity --notification --text='"GnuPG" must be toggled on.' --window-icon=gcr-key --timeout=6; false; }
+        } &&
+        {
+            /usr/local/lib/tpscli is-active Dotfiles ||
+                { zenity --notification --text='"Dotfiles" must be toggled on.' --window-icon=gnome-settings --timeout=6; false; }
+        }
+done
+
+# Close the Persistent Storage window
+pkill -f "python3 /usr/local/lib/tps-frontend" &>/dev/null
+pkill -f 'zenity --notification' &>/dev/null
+
+# Ensure Bitcoin Core's Qt runtime deps are installed.
+#
+# bitcoin-qt's bundled Qt links against libxcb-xinerama0, which recent Tails
+# releases do not ship by default. We strongly recommend enabling Tails'
+# Additional Software persistence feature so the library is automatically
+# reinstalled on every Tails boot — without it, you'll need to enter your
+# admin password and reinstall it every single session.
+required_pkgs=(libxcb-xinerama0)
+missing_pkgs=()
+for pkg in "${required_pkgs[@]}"; do
+    dpkg-query -W -f='${Status}\n' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing_pkgs+=("$pkg")
+done
+if ((${#missing_pkgs[@]})); then
+    # Recommend enabling Additional Software persistence first, if it isn't on.
+    if ! /usr/local/lib/tpscli is-active AdditionalSoftware 2>/dev/null; then
+        zenity --info --title='Recommended: enable "Additional Software" persistence' \
+            --text="Bitcoin Core requires <tt>${missing_pkgs[*]}</tt>, which is not included in Tails by default.\n\n<b>Strongly recommended:</b> before continuing, open <b>Persistent Storage</b> and turn on the <b>Additional Software</b> feature.\n\nWith Additional Software enabled, Tails will ask whether to install this library <i>once</i> or <i>every time you start Tails</i>. Choose <b>Install Every Time</b> — then you won't need to enter your admin password or reinstall on future boots.\n\nWithout Additional Software, the library installs only for this session and must be reinstalled after every reboot (and you'll need an admin password each time).\n\nClick OK to continue with the installation." \
+            --ok-label='OK, Continue' "$ICON" --icon-name=tails-persistent-storage
+    fi
+
+    zenity --info --title='Install missing libraries for Bitcoin Core' \
+        --text="About to install: <tt>${missing_pkgs[*]}</tt>\n\nYou will be prompted for your <b>admin password</b> in the terminal window.\n\nIf you did not set an Administration Password at the Tails Welcome Screen, click Cancel, reboot Tails, click the <b>+</b> menu at the Welcome Screen, set an admin password, then run Bitcoin on Tails again." \
+        --ok-label='Install Now' "$ICON" --icon-name=system-software-install
+    if sudo -n true 2>/dev/null || sudo -v; then
+        sudo apt-get update -q
+        # When Additional Software is enabled, apt/tails-additional-software will
+        # prompt the user whether to install once or persistently — that's the
+        # Tails-native UX and is exactly what we want.
+        if sudo apt-get install -y "${missing_pkgs[@]}"; then
+            :
+        else
+            zenity --error --title='Failed to install required libraries' \
+                --text="apt-get could not install: ${missing_pkgs[*]}\n\nCheck your network connection and try again." \
+                --ok-label='Exit' "$ICON" --icon-name=dialog-error
+            exit 1
+        fi
+    else
+        zenity --error --title='Admin password not set' \
+            --text='An Administration Password is required to install missing libraries.\n\nReboot Tails, click the <b>+</b> at the Welcome Screen, set an <b>Administration Password</b>, then run Bitcoin on Tails again.' \
+            --ok-label='Exit' "$ICON" --icon-name=dialog-error
+        exit 1
+    fi
+fi
+
+# Ensure yad is installed (used by bot-menu, the control panel). Prefer the
+# bundled, hash-verified .deb shipped in the release tarball so first-run
+# works even before the network is fully up. Fall back to apt-get over Tor
+# if the bundled deb is missing, fails verification, or fails to install.
+if ! command -v yad >/dev/null 2>&1; then
+    bundled_debs="$DOTFILES/.local/share/bot/debs"
+    yad_glob=("$bundled_debs"/yad_*.deb)
+    bundled_yad_ok=0
+    if [ -d "$bundled_debs" ] && [ -e "${yad_glob[0]}" ] && [ -s "$bundled_debs/SHA256SUMS" ] \
+        && grep -qv '^[[:space:]]*\(#\|$\)' "$bundled_debs/SHA256SUMS"; then
+        bundled_yad_ok=1
+    fi
+
+    yad_installed=0
+    if ((bundled_yad_ok)); then
+        zenity --info --title='Install yad (bundled)' \
+            --text="The Bitcoin on Tails control panel uses the <b>yad</b> GUI toolkit, which is not included in Tails by default.\n\nA verified copy is bundled with this release. You will be prompted for your <b>admin password</b> to install it." \
+            --ok-label='Install Now' "$ICON" --icon-name=system-software-install
+        if sudo -n true 2>/dev/null || sudo -v; then
+            if (cd "$bundled_debs" && sha256sum -c SHA256SUMS) && \
+               sudo apt-get install -y "${yad_glob[@]}"; then
+                yad_installed=1
+            fi
+        fi
+    fi
+
+    if ! ((yad_installed)); then
+        # Fall back to apt over Tor; reuses the same flow as libxcb-xinerama0.
+        if ! /usr/local/lib/tpscli is-active AdditionalSoftware 2>/dev/null; then
+            zenity --info --title='Recommended: enable "Additional Software" persistence' \
+                --text="The Bitcoin on Tails control panel requires <tt>yad</tt>, which will be installed from Debian over Tor.\n\n<b>Strongly recommended:</b> before continuing, open <b>Persistent Storage</b> and turn on the <b>Additional Software</b> feature, then choose <b>Install Every Time</b> when prompted — without it, yad will need to be reinstalled after every reboot." \
+                --ok-label='OK, Continue' "$ICON" --icon-name=tails-persistent-storage
+        fi
+        zenity --info --title='Install yad' \
+            --text="About to install <tt>yad</tt> over Tor.\n\nYou will be prompted for your <b>admin password</b>." \
+            --ok-label='Install Now' "$ICON" --icon-name=system-software-install
+        if sudo -n true 2>/dev/null || sudo -v; then
+            sudo apt-get update -q
+            sudo apt-get install -y yad || zenity --warning --title='yad install failed' \
+                --text='yad could not be installed. The control panel <tt>bot-menu</tt> will not be available until you re-run the installer with a working network connection.' \
+                --ellipsize "$ICON" --icon-name=dialog-warning
+        else
+            zenity --warning --title='yad install skipped' \
+                --text='Without an admin password, yad cannot be installed. The control panel <tt>bot-menu</tt> will not be available until yad is installed.' \
+                --ellipsize "$ICON" --icon-name=dialog-warning
+        fi
+    fi
+fi
+
+mkdir -vp $XDG_STATE_HOME
+touch $SET_UP

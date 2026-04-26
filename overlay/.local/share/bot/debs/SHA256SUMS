@@ -1,0 +1,4 @@
+# SHA256SUMS for bundled .deb packages.
+# Refresh at release time per debs/README.md.
+# Format matches `sha256sum --binary` output (single space + asterisk).
+

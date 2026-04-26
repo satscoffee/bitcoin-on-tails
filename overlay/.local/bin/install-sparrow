@@ -1,0 +1,445 @@
+#!/bin/bash
+
+# Copyright (c) 2024 Ben Westgate
+# Copyright (c) 2026 Bitcoin on Tails contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+###############################################################################
+# install-sparrow — download, verify, and persistently install Sparrow Wallet.
+#
+# Flow (each step exits loudly on failure with actionable diagnostic):
+#   RESOLVE   → pick version (env override | HEAD redirect | HTML scrape)
+#   KEY       → load Craig Raw's PGP key (cache | keybase | github | keyservers)
+#   CONFIRM   → show fingerprint + version, ask user
+#   DOWNLOAD  → manifest.txt(+.asc) and .deb (resumable)
+#   VERIFY    → gpg VALIDSIG manifest; sha256 --check .deb
+#   UNPACK    → dpkg-deb -vR into the staging dir
+#   DETECT    → locate Sparrow binary, derive upstream abs prefix
+#   REWRITE   → sed that prefix → $DOTFILES/.local; wrap Exec= line in .desktop
+#   INSTALL   → cp -a src/. → $DOTFILES/.local/ + .desktop/icon into XDG_DATA_HOME
+#   SEED      → write $PERSISTENT/.sparrow/config on first install
+#   PUBLISH   → link-dotfiles + update-desktop-database + GNOME favorites
+#   LAUNCH    → gtk-launch
+#
+# Overrides:
+#   SPARROW_VER=2.4.2  — pin a specific release (skips network version probe)
+#
+# Sideload (slow Tor workaround):
+#   Drop sparrow-<ver>-manifest.txt, .asc, and sparrowwallet_<ver>-1_amd64.deb
+#   into $DOTFILES/.local/share/sparrow/ from another machine. curl -C - will
+#   see the complete file and the sha256 check gates integrity.
+###############################################################################
+
+# shellcheck source=/dev/null
+. bitcoin-install-common --funcs-only
+
+readonly SPARROW_REPO="sparrowwallet/sparrow"
+readonly SPARROW_RELEASES_URL="https://github.com/$SPARROW_REPO/releases"
+readonly SPARROW_FINGERPRINT_HINT="D4D0D3202FC06849A257B38DE94618334C674B40"
+# Key sources, tried in order until one parses as a PGP key. keybase.io is
+# the one sparrowwallet.com's install docs recommend.
+readonly SPARROW_KEY_SOURCES=(
+    "https://keybase.io/craigraw/pgp_keys.asc"
+    "https://github.com/craigraw.gpg"
+    "https://keys.openpgp.org/vks/v1/by-fingerprint/$SPARROW_FINGERPRINT_HINT"
+    "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x$SPARROW_FINGERPRINT_HINT"
+    "https://sparrowwallet.com/assets/public/craigraw.asc"
+)
+
+: "${DOTFILES:=/live/persistence/TailsData_unlocked/dotfiles}"
+export XDG_DATA_HOME="$DOTFILES/.local/share"
+export PERSISTENT="/live/persistence/TailsData_unlocked/Persistent"
+
+SPARROW_DIR="$XDG_DATA_HOME/sparrow"
+mkdir -p "$SPARROW_DIR" "$PERSISTENT/.sparrow" \
+         "$XDG_DATA_HOME/applications" "$XDG_DATA_HOME/icons"
+cd "$SPARROW_DIR" || exit 1
+
+esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+
+bail() {
+    local title="$1"; shift
+    zenity --error --title="$title" --text="$*" --ellipsize \
+        "$ICON" --icon-name=dialog-error
+    exit 1
+}
+
+pkill tca &>/dev/null
+
+###############################################################################
+# RESOLVE — pin or probe the release tag
+###############################################################################
+printf '\033]2;Checking for latest Sparrow Wallet release\a'
+VER="$SPARROW_VER"
+LATEST_URL=""
+if [ -z "$VER" ]; then
+    # HEAD redirect; --fail makes curl return non-zero on HTTP errors.
+    LATEST_URL=$(curl -sLI --fail --max-time 30 -o /dev/null \
+        -w '%{url_effective}' "$SPARROW_RELEASES_URL/latest" 2>/dev/null)
+    if [[ "$LATEST_URL" == *"/tag/"* ]]; then
+        VER="${LATEST_URL##*/tag/}"
+        VER="${VER%%[/?#]*}"
+    fi
+    # Fallback: scrape the latest page HTML for a /releases/tag/<VER> link.
+    if [ -z "$VER" ]; then
+        VER=$(curl -sL --fail --max-time 60 "$SPARROW_RELEASES_URL/latest" 2>/dev/null \
+            | grep -oE '/releases/tag/[^"[:space:]]+' \
+            | head -1 | sed 's|.*/tag/||; s|/.*||')
+    fi
+fi
+if [ -z "$VER" ]; then
+    bail "Could not resolve latest Sparrow release" \
+        "Failed to resolve a release tag from $SPARROW_RELEASES_URL/latest\n\nHEAD redirect returned: <tt>${LATEST_URL:-(errored)}</tt>\nHTML scrape found no /tag/ link either.\n\nTry one of:\n  • <tt>sudo systemctl restart tor</tt> then re-run\n  • <tt>SPARROW_VER=2.4.2 install-sparrow</tt>\n  • Pre-download manifest + .deb to <tt>\$DOTFILES/.local/share/sparrow/</tt>"
+fi
+export VER
+RELEASE_BASE="$SPARROW_RELEASES_URL/download/$VER"
+
+###############################################################################
+# KEY — load Craig Raw's PGP key, with cache
+###############################################################################
+KEY_CACHE_DIR="$DOTFILES/.local/share/bitcoin/trusted-keys"
+KEY_CACHE_FILE="$KEY_CACHE_DIR/craigraw.gpg"
+mkdir -p "$KEY_CACHE_DIR" 2>/dev/null
+
+key_is_valid() {
+    [ -s "$1" ] || return 1
+    gpg --show-keys --with-colons "$1" 2>/dev/null | grep -q '^fpr:'
+}
+
+KEY_SOURCE_DISPLAY=""
+if key_is_valid "$KEY_CACHE_FILE"; then
+    cp "$KEY_CACHE_FILE" craigraw.asc
+    KEY_SOURCE_DISPLAY="local cache ($KEY_CACHE_FILE)"
+    printf '\033]2;Using cached Craig Raw signing key\a'
+else
+    rm -f craigraw.asc
+    declare -a TRIED=()
+    for url in "${SPARROW_KEY_SOURCES[@]}"; do
+        printf '\033]2;Fetching Craig Raw signing key from %s\a' "$url"
+        rm -f craigraw.asc
+        if ! curl -sL --fail --max-time 30 -o craigraw.asc "$url" 2>/dev/null; then
+            TRIED+=("$url — unreachable or HTTP error"); continue
+        fi
+        if ! key_is_valid craigraw.asc; then
+            TRIED+=("$url — not a PGP key"); continue
+        fi
+        KEY_SOURCE_DISPLAY="$url"
+        cp craigraw.asc "$KEY_CACHE_FILE" 2>/dev/null || true
+        break
+    done
+    if [ -z "$KEY_SOURCE_DISPLAY" ]; then
+        bail "Could not fetch Craig Raw signing key" \
+            "No key source returned a valid PGP key:\n\n$(printf '  • %s\n' "${TRIED[@]}")\n\nCheck your network (try restarting Tor) and retry."
+    fi
+fi
+
+# Extract primary fingerprint(s) before import, so we can tell the user what
+# they're trusting and so we can pin the signature check to this key.
+mapfile -t SPARROW_FPS < <(
+    gpg --show-keys --with-colons --with-fingerprint craigraw.asc 2>/dev/null \
+    | awk -F: '$1=="fpr" && !seen[$10]++ {print $10}'
+)
+(( ${#SPARROW_FPS[@]} )) || bail "Could not parse Sparrow signing key" \
+    "Key from $KEY_SOURCE_DISPLAY passed parseability but fingerprint extraction failed."
+
+gpg --import craigraw.asc &>/dev/null
+rm -f craigraw.asc
+
+###############################################################################
+# CONFIRM
+###############################################################################
+FP_DISPLAY=$(printf '<tt>%s</tt>\n' "${SPARROW_FPS[@]}")
+zenity --question \
+    --title="Confirm Sparrow Wallet install" \
+    --text="Sparrow Wallet <b>$VER</b>\n\nSigned by Craig Raw (single signature required).\nKey fingerprint from $KEY_SOURCE_DISPLAY:\n$FP_DISPLAY\nProceed with download and installation?" \
+    --ok-label="Install" --cancel-label="Cancel" \
+    "$ICON" --icon-name=bitcoin128 || exit 1
+
+###############################################################################
+# DOWNLOAD — manifest + sig first, then the .deb
+###############################################################################
+MANIFEST_CANDIDATES=(
+    "sparrow-$VER-manifest.txt"
+    "manifest.txt"
+)
+printf '\033]2;Downloading Sparrow Wallet manifest\a'
+MANIFEST_REMOTE=""
+for candidate in "${MANIFEST_CANDIDATES[@]}"; do
+    rm -f manifest.txt manifest.txt.asc
+    curl -sL --fail --max-time 60 -o manifest.txt     "$RELEASE_BASE/$candidate"     2>/dev/null || continue
+    [ -s manifest.txt ] || continue
+    curl -sL --fail --max-time 60 -o manifest.txt.asc "$RELEASE_BASE/$candidate.asc" 2>/dev/null || continue
+    [ -s manifest.txt.asc ] || continue
+    MANIFEST_REMOTE="$candidate"
+    break
+done
+[ -n "$MANIFEST_REMOTE" ] || bail "Sparrow manifest download failed" \
+    "Could not download a manifest from $RELEASE_BASE.\n\nTried:\n$(printf '  • %s\n' "${MANIFEST_CANDIDATES[@]}")"
+
+###############################################################################
+# VERIFY — strict: VALIDSIG must match Craig Raw's fingerprint, not any key.
+###############################################################################
+STATUS=$(gpg --status-fd 1 --verify manifest.txt.asc manifest.txt 2>/dev/null)
+SIG_OK=0
+for fp in "${SPARROW_FPS[@]}"; do
+    if echo "$STATUS" | grep -q "VALIDSIG $fp"; then SIG_OK=1; break; fi
+done
+(( SIG_OK )) || bail "Sparrow signature verification failed" \
+    "manifest.txt.asc did not verify against Craig Raw's key.\n\ngpg status:\n<tt>$(echo "$STATUS" | head -20 | esc)</tt>"
+
+###############################################################################
+# DEB — parse filename from signed manifest, download, hash-check
+###############################################################################
+# sha256sum binary-mode prefixes filenames with '*'; strip that before use.
+DEB_NAME=$(
+    awk '{print $2}' manifest.txt \
+    | sed -E 's|^\*||; s|^\./||' \
+    | grep -E '\.deb$' \
+    | grep -v -i server \
+    | grep -E '(amd64|x86_64)' \
+    | head -1
+)
+[ -n "$DEB_NAME" ] || bail "Sparrow: no suitable .deb in manifest" \
+    "manifest.txt did not list an amd64/x86_64 desktop .deb.\n\nContents:\n<tt>$(head -20 manifest.txt | esc)</tt>"
+
+printf '\033]2;Downloading Sparrow Wallet %s\a' "$VER"
+# -C - lets users sideload a .deb by pre-dropping it here, and lets a killed
+# download resume. --max-time is generous because Tor can be slow.
+retry_on_fail curl -L --fail -C - --max-time 3600 -o "$DEB_NAME" "$RELEASE_BASE/$DEB_NAME"
+
+if ! sha256sum --check --ignore-missing manifest.txt 2>&1 | grep -q "$DEB_NAME: OK"; then
+    rm -f "$DEB_NAME"
+    printf '\033]2;Re-downloading Sparrow %s (sha256 mismatch)\a' "$VER"
+    retry_on_fail curl -L --fail --max-time 3600 -o "$DEB_NAME" "$RELEASE_BASE/$DEB_NAME"
+    sha256sum --check --ignore-missing manifest.txt 2>&1 | grep -q "$DEB_NAME: OK" \
+        || bail "Sparrow checksum mismatch" \
+        "$DEB_NAME did not match the manifest sha256 even after a fresh download."
+fi
+
+###############################################################################
+# UNPACK + DETECT — find the Sparrow tree generically (layout-agnostic)
+###############################################################################
+already_installed=0
+[ -x "$DOTFILES/.local/bin/Sparrow" ] && already_installed=1
+
+printf '\033]2;Installing Sparrow Wallet %s\a' "$VER"
+rm -rf DEBIAN opt usr
+dpkg-deb -vR "$DEB_NAME" . || bail "dpkg-deb failed" \
+    "Could not extract $DEB_NAME. The file may be corrupt; delete it and retry."
+
+# Locate the Sparrow launcher binary anywhere under the extracted tree. From
+# that, derive the relative tree dir ($SRC_TREE_REL, e.g. "opt/sparrowwallet")
+# and the absolute prefix baked into shipped files ($SRC_ABS_PREFIX, e.g.
+# "/opt/sparrowwallet"). Upstream has used /opt/sparrow, /opt/sparrowwallet,
+# and is free to rename again — this just follows the binary.
+SPARROW_BIN_REL=$(find . -type f -path '*/bin/Sparrow' -executable 2>/dev/null | head -1)
+[ -z "$SPARROW_BIN_REL" ] && SPARROW_BIN_REL=$(find . -type f -path '*/bin/Sparrow' 2>/dev/null | head -1)
+
+if [ -z "$SPARROW_BIN_REL" ]; then
+    TOP=$(ls -la . 2>&1 | head -20 | esc)
+    CONTENTS=$(dpkg-deb -c "$DEB_NAME" 2>/dev/null | awk '{print $NF}' | head -40 | esc)
+    bail "Sparrow install: could not find Sparrow binary in the deb" \
+        "Expected a */bin/Sparrow launcher somewhere in the extracted .deb.\n\nUnpack dir:\n<tt>$TOP</tt>\n\nFirst 40 paths inside deb:\n<tt>$CONTENTS</tt>"
+fi
+# ./opt/sparrowwallet/bin/Sparrow → opt/sparrowwallet → /opt/sparrowwallet
+SRC_TREE_REL="${SPARROW_BIN_REL#./}"
+SRC_TREE_REL="${SRC_TREE_REL%/bin/Sparrow}"
+SRC_ABS_PREFIX="/$SRC_TREE_REL"
+
+###############################################################################
+# REWRITE — move absolute paths inside shipped files from /opt/... to $DOTFILES
+###############################################################################
+# Text-files-only sed: binary jars don't contain these absolute paths and
+# rewriting them corrupts them. Grep-filter to text files with the prefix.
+mapfile -t REWRITE_FILES < <(
+    grep -Irl --binary-files=without-match -F "$SRC_ABS_PREFIX" "$SRC_TREE_REL" 2>/dev/null
+)
+if (( ${#REWRITE_FILES[@]} )); then
+    sed -i "s|$SRC_ABS_PREFIX|$DOTFILES/.local|g" "${REWRITE_FILES[@]}"
+fi
+
+# Locate the .desktop and icon wherever the packager chose to put them.
+DESKTOP_SRC=$(find "$SRC_TREE_REL" -type f -iname '*sparrow*.desktop' 2>/dev/null | head -1)
+[ -z "$DESKTOP_SRC" ] && DESKTOP_SRC=$(find . -type f -iname '*sparrow*.desktop' 2>/dev/null | head -1)
+ICON_SRC=$(find "$SRC_TREE_REL" -type f -iname 'Sparrow*.png' 2>/dev/null | head -1)
+[ -z "$ICON_SRC" ] && ICON_SRC=$(find . -type f -iname 'Sparrow*.png' 2>/dev/null | head -1)
+
+[ -n "$DESKTOP_SRC" ] && [ -f "$DESKTOP_SRC" ] || bail "Sparrow .desktop not found in deb" \
+    "Looked for <tt>*sparrow*.desktop</tt> in <tt>$SRC_TREE_REL/</tt> — nothing found.\n\nPackage layout may have shifted again."
+
+# Install .desktop: rewrite Exec= surgically (not blanket-sed across all files),
+# add SingleMainWindow=true so repeated launches re-focus the existing window.
+#
+# %U at the end preserves GNOME's field code so that double-clicking a .psbt
+# (or any of the MimeType= entries) hands the path to Sparrow via wrapped.
+# Without %U, file-association launches fire Sparrow with no argument.
+#
+# The section guard only rewrites Exec= inside [Desktop Entry]. If upstream
+# ever adds [Desktop Action <name>] entries (it hasn't as of 2.4), their
+# Exec= lines stay intact; the blanket path rewrite above has already pointed
+# them at $DOTFILES/.local/bin/Sparrow, so they'll launch (without persistent
+# data-dir wiring, which is a known limitation if/when actions land upstream).
+WRAPPED_EXEC="$DOTFILES/.local/bin/wrapped Sparrow -d $PERSISTENT/.sparrow %U"
+awk -v exec_line="Exec=$WRAPPED_EXEC" '
+    /^\[.*\]$/ {
+        in_desktop_entry = ($0 == "[Desktop Entry]")
+    }
+    in_desktop_entry && /^Exec=/ {
+        print exec_line
+        print "SingleMainWindow=true"
+        printed_smw = 1
+        next
+    }
+    { print }
+    END {
+        if (in_desktop_entry && !printed_smw) print "SingleMainWindow=true"
+    }
+' "$DESKTOP_SRC" > "$XDG_DATA_HOME/applications/sparrow-Sparrow.desktop"
+
+# Icon (best-effort — Sparrow still launches without it, just no pretty icon)
+[ -n "$ICON_SRC" ] && [ -f "$ICON_SRC" ] && \
+    cp -a "$ICON_SRC" "$XDG_DATA_HOME/icons/Sparrow.png" 2>/dev/null
+
+###############################################################################
+# INSTALL — move the Sparrow tree into $DOTFILES/.local/
+###############################################################################
+CP_LOG=$(mktemp)
+if ! cp -a "$SRC_TREE_REL/." "$DOTFILES/.local/" 2>"$CP_LOG"; then
+    ERR=$(esc < "$CP_LOG")
+    rm -f "$CP_LOG"
+    bail "Sparrow install: copy into persistence failed" \
+        "cp -a $SRC_TREE_REL/. → $DOTFILES/.local/ failed:\n<tt>$ERR</tt>\n\nMake sure persistent storage is unlocked and writable."
+fi
+rm -f "$CP_LOG"
+
+# Run Sparrow's postinst (registers MIME handlers). It writes to $HOME —
+# move the generated defaults.list into persistence.
+DEBIAN/postinst configure &>/dev/null || true
+[ -f "$HOME/.local/share/applications/defaults.list" ] && \
+    mv "$HOME/.local/share/applications/defaults.list" \
+       "$XDG_DATA_HOME/applications/" 2>/dev/null || true
+
+# Clean up staging
+rm -rf DEBIAN opt usr "$SRC_TREE_REL"
+
+###############################################################################
+# SEED — wallet config on first install only (don't clobber user edits)
+###############################################################################
+if [ ! -s "$PERSISTENT/.sparrow/config" ]; then
+    cat > "$PERSISTENT/.sparrow/config" <<EOF
+{
+  "mode": "ONLINE",
+  "bitcoinUnit": "AUTO",
+  "unitFormat": "DOT",
+  "feeRatesSource": "ELECTRUM_SERVER",
+  "loadRecentWallets": true,
+  "validateDerivationPaths": true,
+  "groupByAddress": true,
+  "includeMempoolOutputs": true,
+  "notifyNewTransactions": true,
+  "checkNewVersions": true,
+  "theme": "LIGHT",
+  "openWalletsInNewWindows": false,
+  "hideEmptyUsedAddresses": false,
+  "showTransactionHex": true,
+  "showLoadingLog": true,
+  "showAddressTransactionCount": false,
+  "showDeprecatedImportExport": false,
+  "signBsmsExports": false,
+  "preventSleep": false,
+  "recentWalletFiles": [],
+  "dustAttackThreshold": 1000,
+  "enumerateHwPeriod": 30,
+  "useZbar": true,
+  "serverType": "BITCOIN_CORE",
+  "coreServer": "http://127.0.0.1:17600",
+  "coreAuthType": "COOKIE",
+  "coreDataDir": "$PERSISTENT/.bitcoin",
+  "useLegacyCoreWallet": false,
+  "useProxy": true,
+  "proxyServer": "127.0.0.1:9050",
+  "autoSwitchProxy": true,
+  "maxServerTimeout": 34,
+  "maxPageSize": 100,
+  "usePayNym": false,
+  "mempoolFullRbf": false,
+  "appWidth": 927.0,
+  "appHeight": 922.0
+}
+EOF
+fi
+
+###############################################################################
+# PUBLISH — make the new files visible to the running GNOME session
+###############################################################################
+# Mirror new files from $DOTFILES into $HOME. Without this, GNOME Shell and
+# gtk-launch won't see sparrow-Sparrow.desktop until next login.
+link-dotfiles &>/dev/null || true
+update-desktop-database "$HOME/.local/share/applications" &>/dev/null || true
+
+# Add Sparrow to GNOME favorites, right after Bitcoin if present. Idempotent.
+#
+# gsettings emits the array with the trailing "]" right after the last entry,
+# so a literal search for "'bitcoin-qt.desktop'," misses the last-element case
+# (no trailing comma). The extended sed below matches BOTH the middle-of-list
+# (trailing ", ") and end-of-list ("]") forms. Empty arrays — emitted as
+# "@as []" — are handled separately because the generic prepend sed produces
+# a malformed "@as ['sparrow-Sparrow.desktop', ]" that gsettings rejects.
+#
+# NB: `wrapped` normalizes favorite-apps to its own hardcoded list on every
+# Sparrow launch, so this step is effectively first-boot UX — the insertion
+# order here is cosmetic beyond the first launch.
+current_favs=$(gsettings get org.gnome.shell favorite-apps 2>/dev/null)
+if ! echo "$current_favs" | grep -q "sparrow-Sparrow.desktop"; then
+    if echo "$current_favs" | grep -q "bitcoin-qt.desktop"; then
+        # Handles both "..., 'bitcoin-qt.desktop', ..." and "..., 'bitcoin-qt.desktop']"
+        new_favs=$(echo "$current_favs" | sed -E "s/('bitcoin-qt.desktop')(, |\])/\1, 'sparrow-Sparrow.desktop'\2/")
+    elif echo "$current_favs" | grep -qE '^\s*(@as )?\[\s*\]\s*$'; then
+        new_favs="['sparrow-Sparrow.desktop']"
+    else
+        new_favs=$(echo "$current_favs" | sed "s|\[|['sparrow-Sparrow.desktop', |")
+    fi
+    gsettings set org.gnome.shell favorite-apps "$new_favs" 2>/dev/null || true
+fi
+
+###############################################################################
+# VERIFY + LAUNCH
+###############################################################################
+SPARROW_BIN="$DOTFILES/.local/bin/Sparrow"
+SPARROW_DESKTOP="$DOTFILES/.local/share/applications/sparrow-Sparrow.desktop"
+if ! [ -x "$SPARROW_BIN" ] || ! [ -s "$SPARROW_DESKTOP" ]; then
+    missing=()
+    [ -x "$SPARROW_BIN" ]     || missing+=("$SPARROW_BIN")
+    [ -s "$SPARROW_DESKTOP" ] || missing+=("$SPARROW_DESKTOP")
+    bail "Sparrow install did not land correctly" \
+        "Install reported success but these are missing:\n<tt>$(printf '%s\n' "${missing[@]}")</tt>"
+fi
+
+if ((already_installed)); then
+    zenity --info --title="Sparrow Wallet updated" \
+        --text="Upgraded to Sparrow Wallet $VER." \
+        --icon-name=Sparrow "$ICON" &
+else
+    zenity --info --title="Sparrow Wallet installed" \
+        --text="Sparrow Wallet $VER has been installed." \
+        --icon-name=Sparrow "$ICON" &
+fi
+
+gtk-launch sparrow-Sparrow 2>/dev/null || "$SPARROW_BIN" -d "$PERSISTENT/.sparrow" &
