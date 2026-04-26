@@ -81,6 +81,192 @@ bail() {
     exit 1
 }
 
+###############################################################################
+# Lifecycle modes (--check / --update / --uninstall)
+###############################################################################
+
+# sparrow_resolve_latest — silently echo latest Sparrow tag, exit non-zero on
+# failure. Used by `install-sparrow --check`.
+sparrow_resolve_latest() {
+    local effective tag
+    effective=$(curl -sLI --fail --max-time 30 -o /dev/null \
+        -w '%{url_effective}' "$SPARROW_RELEASES_URL/latest" 2>/dev/null) || return 1
+    if [[ "$effective" == *"/tag/"* ]]; then
+        tag="${effective##*/tag/}"
+        tag="${tag%%[/?#]*}"
+    fi
+    if [ -z "$tag" ]; then
+        tag=$(curl -sL --fail --max-time 60 "$SPARROW_RELEASES_URL/latest" 2>/dev/null \
+            | grep -oE '/releases/tag/[^"[:space:]]+' \
+            | head -1 | sed 's|.*/tag/||; s|/.*||')
+    fi
+    [ -n "$tag" ] && printf '%s\n' "$tag"
+}
+
+sparrow_get_installed_version() {
+    if [ -x "$DOTFILES/.local/bin/Sparrow" ]; then
+        "$DOTFILES/.local/bin/Sparrow" --version 2>/dev/null \
+            | head -1 | awk '{print $NF}' | sed 's/^v//'
+    fi
+}
+
+sparrow_uninstall() {
+    if ! [ -x "$DOTFILES/.local/bin/Sparrow" ]; then
+        zenity --info --title="Sparrow not installed" \
+            --text="Sparrow Wallet does not appear to be installed.\n\nNothing to uninstall." \
+            --ellipsize "$ICON" --icon-name=Sparrow 2>/dev/null \
+            || echo "Sparrow Wallet is not installed."
+        return 0
+    fi
+
+    if ! zenity --question --title="Uninstall Sparrow Wallet?" \
+        --text="This will remove the Sparrow Wallet program from your Persistent Storage.\n\nYou will be asked separately whether to keep your wallets and settings.\n\nProceed?" \
+        --ok-label="Continue" --cancel-label="Cancel" \
+        --width=440 "$ICON" --icon-name=Sparrow 2>/dev/null; then
+        return 0
+    fi
+
+    pgrep -x Sparrow >/dev/null 2>&1 && pkill -x Sparrow 2>/dev/null
+
+    local del_wallets=0 del_settings=0
+    if zenity --question --title="Delete Sparrow wallets?" \
+        --text="Delete your Sparrow wallet files (<tt>.wallet</tt>)?\n\nLocation: <tt>$PERSISTENT/.sparrow/wallets/</tt>\n\n<b>This is destructive — wallets contain your private keys.</b> Only do this if you have already backed up the wallets elsewhere.\n\n<b>Default: keep.</b>" \
+        --ok-label="Delete wallets" --cancel-label="Keep" --default-cancel \
+        --width=440 "$ICON" --icon-name=dialog-warning 2>/dev/null; then
+        del_wallets=1
+    fi
+
+    if zenity --question --title="Delete Sparrow settings?" \
+        --text="Delete Sparrow's settings and preferences?\n\nLocation: <tt>$PERSISTENT/.sparrow/config</tt> and related files\n\n<b>Default: keep.</b>" \
+        --ok-label="Delete settings" --cancel-label="Keep" --default-cancel \
+        --width=440 "$ICON" --icon-name=preferences-system 2>/dev/null; then
+        del_settings=1
+    fi
+
+    # Remove via manifest if present, else best-effort by known paths.
+    # Defense in depth: only honor manifest entries that live under the
+    # known install prefixes. A malformed/tampered manifest with `..` or an
+    # unrelated absolute path is silently skipped — the belt-and-suspenders
+    # rm -rf below covers the canonical layout regardless.
+    local manifest="$XDG_STATE_HOME/bot/installed-files-sparrow.txt"
+    if [ -s "$manifest" ]; then
+        while IFS= read -r abs; do
+            [ -z "$abs" ] && continue
+            case "$abs" in
+                *..*) continue ;;
+                "$DOTFILES/.local/"*|"$XDG_DATA_HOME/"*|"$HOME/.local/"*) ;;
+                *) continue ;;
+            esac
+            rm -f "$abs" 2>/dev/null
+        done < "$manifest"
+    fi
+    rm -rf "$DOTFILES/.local/lib/Sparrow" \
+           "$DOTFILES/.local/share/sparrow" \
+           "$DOTFILES/.local/bin/Sparrow" \
+           "$XDG_DATA_HOME/applications/sparrow-Sparrow.desktop" \
+           "$XDG_DATA_HOME/icons/Sparrow.png" 2>/dev/null
+
+    # Drop from GNOME favorites.
+    local current_favs
+    current_favs=$(gsettings get org.gnome.shell favorite-apps 2>/dev/null || echo)
+    if echo "$current_favs" | grep -q "sparrow-Sparrow.desktop"; then
+        local new_favs
+        new_favs=$(echo "$current_favs" \
+            | sed -E "s/, ?'sparrow-Sparrow.desktop'//g; s/'sparrow-Sparrow.desktop',? ?//g")
+        gsettings set org.gnome.shell favorite-apps "$new_favs" 2>/dev/null || true
+    fi
+
+    if (( del_wallets )); then
+        rm -rf "$PERSISTENT/.sparrow/wallets" 2>/dev/null
+    fi
+    if (( del_settings )); then
+        rm -f "$PERSISTENT/.sparrow/config" 2>/dev/null
+        rm -rf "$PERSISTENT/.sparrow/preferences" \
+               "$PERSISTENT/.sparrow/cache" 2>/dev/null
+    fi
+
+    rm -f "$XDG_STATE_HOME/bot/installed-files-sparrow.txt" \
+          "$XDG_CACHE_HOME/bot/check-sparrow.kv" \
+          "$XDG_CACHE_HOME/bot/latest-sparrow.txt" 2>/dev/null
+
+    update-desktop-database "$HOME/.local/share/applications" &>/dev/null || true
+
+    zenity --info --title="Sparrow uninstalled" \
+        --text="Sparrow Wallet has been removed.\n\nKept: $( ((del_wallets)) || echo "wallets, ")$( ((del_settings)) || echo "settings")$( ((del_wallets && del_settings)) && echo "(nothing)" )" \
+        --ellipsize "$ICON" --icon-name=dialog-information 2>/dev/null \
+        || echo "Sparrow Wallet uninstalled."
+}
+
+# Mode dispatch — must come before any interactive work so --check / --uninstall
+# don't pop dialogs the user didn't ask for.
+case "${1:-}" in
+    --check)
+        latest=""; status="ok"
+        if bot_latest_cache_fresh sparrow; then
+            latest="$(bot_latest_cache_read sparrow)"
+        elif latest="$(sparrow_resolve_latest 2>/dev/null)" && [ -n "$latest" ]; then
+            bot_latest_cache_write sparrow "$latest"
+        else
+            status="offline"
+            latest="$(bot_latest_cache_read sparrow)"
+        fi
+        installed_ver="$(sparrow_get_installed_version || echo)"
+        # The dist marker only ever holds "core" or "knots", so for sparrow we
+        # have to pass the installed version + path explicitly. This way
+        # bot_write_check_kv emits a fully-populated KV in a single atomic
+        # rename — bot-menu polling the cache file can't see a half-written
+        # state where installed_version is empty.
+        installed_path=""
+        [ -x "$DOTFILES/.local/bin/Sparrow" ] && installed_path="$DOTFILES/.local/bin/Sparrow"
+        bot_write_check_kv sparrow "$latest" "$status" \
+            "$installed_ver" "$installed_path"
+        if [ -n "$latest" ] && [ -n "$installed_ver" ] && [ "$installed_ver" != "$latest" ]; then
+            echo "Sparrow Wallet: update available — installed $installed_ver, latest $latest"
+            echo "Release notes: $(bot_changelog_url sparrow "$latest")"
+        elif [ -n "$latest" ]; then
+            echo "Sparrow Wallet: up to date ($latest)"
+        else
+            echo "Sparrow Wallet: could not reach upstream"
+        fi
+        exit 0
+        ;;
+    --update)
+        if ! [ -x "$DOTFILES/.local/bin/Sparrow" ]; then
+            echo "Sparrow Wallet is not installed. Run \`install-sparrow\` to install it." >&2
+            exit 1
+        fi
+        export BOT_AUTO_LATEST=1
+        # Fall through to install flow.
+        ;;
+    --uninstall)
+        sparrow_uninstall
+        exit 0
+        ;;
+    --help|-h)
+        cat <<EOF
+Sparrow Wallet installer
+
+Usage:
+  install-sparrow                Interactive install / update
+  install-sparrow --check        Report installed + latest upstream version
+  install-sparrow --update       Reinstall the latest published release
+  install-sparrow --uninstall    Remove Sparrow (with prompts to keep wallets)
+  install-sparrow --help         Show this message
+
+Environment:
+  SPARROW_VER=2.4.2              Pin a specific release tag
+EOF
+        exit 0
+        ;;
+    "")
+        ;;
+    *)
+        echo "Unknown mode: $1" >&2
+        echo "Try: install-sparrow --help" >&2
+        exit 2
+        ;;
+esac
+
 pkill tca &>/dev/null
 
 ###############################################################################
@@ -163,14 +349,16 @@ gpg --import craigraw.asc &>/dev/null
 rm -f craigraw.asc
 
 ###############################################################################
-# CONFIRM
+# CONFIRM (skipped in --update flow; user already clicked Update)
 ###############################################################################
 FP_DISPLAY=$(printf '<tt>%s</tt>\n' "${SPARROW_FPS[@]}")
-zenity --question \
-    --title="Confirm Sparrow Wallet install" \
-    --text="Sparrow Wallet <b>$VER</b>\n\nSigned by Craig Raw (single signature required).\nKey fingerprint from $KEY_SOURCE_DISPLAY:\n$FP_DISPLAY\nProceed with download and installation?" \
-    --ok-label="Install" --cancel-label="Cancel" \
-    "$ICON" --icon-name=bitcoin128 || exit 1
+if [ "${BOT_AUTO_LATEST:-0}" != "1" ]; then
+    zenity --question \
+        --title="Confirm Sparrow Wallet install" \
+        --text="Sparrow Wallet <b>$VER</b>\n\nSigned by Craig Raw (single signature required).\nKey fingerprint from $KEY_SOURCE_DISPLAY:\n$FP_DISPLAY\nProceed with download and installation?" \
+        --ok-label="Install" --cancel-label="Cancel" \
+        "$ICON" --icon-name=bitcoin128 || exit 1
+fi
 
 ###############################################################################
 # DOWNLOAD — manifest + sig first, then the .deb
@@ -328,6 +516,16 @@ if ! cp -a "$SRC_TREE_REL/." "$DOTFILES/.local/" 2>"$CP_LOG"; then
         "cp -a $SRC_TREE_REL/. → $DOTFILES/.local/ failed:\n<tt>$ERR</tt>\n\nMake sure persistent storage is unlocked and writable."
 fi
 rm -f "$CP_LOG"
+
+# Capture install manifest for --uninstall. Absolute paths so we don't have
+# to remember the install root later.
+mkdir -p "$XDG_STATE_HOME/bot" 2>/dev/null
+{
+    find "$SRC_TREE_REL" -type f -printf "%P\n" 2>/dev/null \
+        | sed "s|^|$DOTFILES/.local/|"
+    echo "$XDG_DATA_HOME/applications/sparrow-Sparrow.desktop"
+    [ -f "$XDG_DATA_HOME/icons/Sparrow.png" ] && echo "$XDG_DATA_HOME/icons/Sparrow.png"
+} > "$XDG_STATE_HOME/bot/installed-files-sparrow.txt" 2>/dev/null || true
 
 # Run Sparrow's postinst (registers MIME handlers). It writes to $HOME —
 # move the generated defaults.list into persistence.

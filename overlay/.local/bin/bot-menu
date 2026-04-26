@@ -34,8 +34,13 @@ export DOTFILES="/live/persistence/TailsData_unlocked/dotfiles"
 export PERSISTENT="/live/persistence/TailsData_unlocked/Persistent"
 export DATA_DIR="$PERSISTENT/.bitcoin"
 export XDG_DATA_HOME="$DOTFILES/.local/share"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$DOTFILES/.cache}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-$DOTFILES/.local/state}"
 export ICON_FILE="$XDG_DATA_HOME/icons/bot128.png"
 export ICON_ARG="--window-icon=$ICON_FILE"
+
+CHECK_KV_DIR="$XDG_CACHE_HOME/bot"
+DIST_MARKER="$XDG_STATE_HOME/bot/dist"
 
 # GPG fingerprint shown on About tab. Keep in sync with README.
 GPG_FINGERPRINT="2EE3 5C29 41D5 4C9E 9E2D  C908 33A3 9346 82DD 9E18"
@@ -189,11 +194,63 @@ get_sparrow_version() {
 }
 
 ###############################################################################
+# Update-check helpers — read KV files written by `install-{slug} --check`.
+# bot-menu never runs --check itself unless the user clicks "Check for updates".
+###############################################################################
+
+# kv_get FILE KEY → echo value or empty.
+kv_get() {
+    [ -s "$1" ] || return 1
+    awk -F= -v k="$2" '$1==k {sub(/^[^=]*=/, ""); print; exit}' "$1"
+}
+
+# active_dist → echoes "core" or "knots" based on the install marker, with
+# bitcoind --version as fallback. Empty if neither is installed.
+active_dist() {
+    if [ -s "$DIST_MARKER" ]; then
+        head -1 "$DIST_MARKER" | tr -d '[:space:]'
+    elif command -v bitcoind >/dev/null 2>&1; then
+        if bitcoind --version 2>/dev/null | grep -qi knots; then
+            echo "knots"
+        else
+            echo "core"
+        fi
+    fi
+}
+
+# update_status_line SLUG → human one-liner derived from the cached KV.
+# Returns "" if there's no cache yet.
+update_status_line() {
+    local kv="$CHECK_KV_DIR/check-$1.kv"
+    [ -s "$kv" ] || { echo ""; return; }
+    local label iv lv avail iso status
+    label=$(kv_get "$kv" dist_label)
+    iv=$(kv_get "$kv" installed_version)
+    lv=$(kv_get "$kv" latest_version)
+    avail=$(kv_get "$kv" update_available)
+    iso=$(kv_get "$kv" last_check_iso)
+    status=$(kv_get "$kv" check_status)
+    if [ "$status" != "ok" ]; then
+        echo "Last check failed (offline?) — $iso"
+    elif [ "$avail" = "true" ]; then
+        echo "Update available: $iv → $lv (last checked $iso)"
+    elif [ -n "$lv" ]; then
+        echo "Up to date: $lv (last checked $iso)"
+    else
+        echo "No check on file."
+    fi
+}
+
+###############################################################################
 # Build tab content
 ###############################################################################
 
 build_status_tab() {
     local key=$1
+    local dist; dist="$(active_dist)"
+    local btc_update sparrow_update
+    btc_update="$(update_status_line "${dist:-core}")"
+    sparrow_update="$(update_status_line sparrow)"
     yad --plug="$key" --tabnum=1 \
         --form --columns=1 \
         --field="<b>Bitcoin on Tails</b>:LBL" "" \
@@ -203,11 +260,110 @@ build_status_tab() {
         --field="Version:RO" "$(get_bitcoin_version)" \
         --field="Status:RO" "$(get_sync_status)" \
         --field="Peers:RO" "$(get_peer_count)" \
+        --field="Updates:RO" "${btc_update:-Click \"Check for updates\" on the Bitcoin tab.}" \
         --field="<b>Storage</b>:LBL" "" \
         --field="Disk free:RO" "$(get_disk_free)" \
         --field="Prune setting:RO" "$(get_prune_setting)" \
         --field="<b>Wallet</b>:LBL" "" \
-        --field="Sparrow:RO" "$(get_sparrow_version)" &
+        --field="Sparrow:RO" "$(get_sparrow_version)" \
+        --field="Updates:RO" "${sparrow_update:-Click \"Check for updates\" on the Sparrow tab.}" &
+}
+
+# Action-button helpers. yad FBTN runs the command through /bin/sh -c.
+# We launch each action in a fresh terminal so the user sees the install
+# script's output (these are interactive in --update mode).
+mk_action() {
+    # mk_action TITLE COMMAND
+    local title="$1" cmd="$2"
+    printf 'x-terminal-emulator -T %q -e bash -c %q &' "$title" \
+        "$cmd; echo; echo Press any key to close.; read -r -n 1"
+}
+
+build_bitcoin_tab() {
+    local key=$1
+    local dist; dist="$(active_dist)"
+    local kv="$CHECK_KV_DIR/check-${dist:-core}.kv"
+    local label iv lv chg status_line
+    label=$(kv_get "$kv" dist_label || true)
+    iv=$(kv_get "$kv" installed_version || true)
+    lv=$(kv_get "$kv" latest_version || true)
+    chg=$(kv_get "$kv" changelog_url || true)
+    status_line="$(update_status_line "${dist:-core}")"
+    [ -z "$status_line" ] && status_line="No check on file. Click \"Check for updates\" to fetch."
+    [ -z "$dist" ] && label="Not installed yet"
+
+    local cmd_check cmd_update cmd_uninstall cmd_changelog
+    if [ -n "$dist" ]; then
+        cmd_check="$(mk_action "BoT — checking $label" "install-$dist --check")"
+        cmd_update="$(mk_action "BoT — updating $label" "install-$dist --update")"
+        cmd_uninstall="$(mk_action "BoT — uninstalling $label" "install-$dist --uninstall")"
+    else
+        cmd_check="$(mk_action 'BoT — install Bitcoin' 'b')"
+        cmd_update="$cmd_check"
+        cmd_uninstall=":"
+    fi
+    if [ -n "$chg" ]; then
+        cmd_changelog="xdg-open $(printf '%q' "$chg") >/dev/null 2>&1 &"
+    else
+        cmd_changelog="zenity --info --title='No release notes' --text='No changelog URL on file. Click Check for updates first.' --ellipsize $ICON_ARG &"
+    fi
+
+    yad --plug="$key" --tabnum=2 \
+        --form --columns=1 \
+        --field="<b>${label}</b>:LBL" "" \
+        --field="Installed version:RO" "${iv:-—}" \
+        --field="Latest published:RO" "${lv:-—}" \
+        --field="Status:RO" "$status_line" \
+        --field="Check for updates:FBTN" "$cmd_check" \
+        --field="What's changed:FBTN" "$cmd_changelog" \
+        --field="Update now:FBTN" "$cmd_update" \
+        --field="Uninstall:FBTN" "$cmd_uninstall" &
+}
+
+build_sparrow_tab() {
+    local key=$1
+    local kv="$CHECK_KV_DIR/check-sparrow.kv"
+    local iv lv chg status_line installed
+    iv=$(kv_get "$kv" installed_version || true)
+    lv=$(kv_get "$kv" latest_version || true)
+    chg=$(kv_get "$kv" changelog_url || true)
+    status_line="$(update_status_line sparrow)"
+    [ -z "$status_line" ] && status_line="No check on file. Click \"Check for updates\" to fetch."
+    if [ -x "$DOTFILES/.local/bin/Sparrow" ]; then
+        installed="Sparrow Wallet (installed)"
+    else
+        installed="Sparrow Wallet (not installed)"
+    fi
+
+    local cmd_check cmd_install cmd_update cmd_uninstall cmd_changelog
+    cmd_check="$(mk_action 'BoT — checking Sparrow' 'install-sparrow --check')"
+    cmd_install="$(mk_action 'BoT — installing Sparrow' 'install-sparrow')"
+    cmd_update="$(mk_action 'BoT — updating Sparrow' 'install-sparrow --update')"
+    cmd_uninstall="$(mk_action 'BoT — uninstalling Sparrow' 'install-sparrow --uninstall')"
+    if [ -n "$chg" ]; then
+        cmd_changelog="xdg-open $(printf '%q' "$chg") >/dev/null 2>&1 &"
+    else
+        cmd_changelog="zenity --info --title='No release notes' --text='No changelog URL on file. Click Check for updates first.' --ellipsize $ICON_ARG &"
+    fi
+
+    if [ -x "$DOTFILES/.local/bin/Sparrow" ]; then
+        yad --plug="$key" --tabnum=3 \
+            --form --columns=1 \
+            --field="<b>$installed</b>:LBL" "" \
+            --field="Installed version:RO" "${iv:-—}" \
+            --field="Latest published:RO" "${lv:-—}" \
+            --field="Status:RO" "$status_line" \
+            --field="Check for updates:FBTN" "$cmd_check" \
+            --field="What's changed:FBTN" "$cmd_changelog" \
+            --field="Update now:FBTN" "$cmd_update" \
+            --field="Uninstall:FBTN" "$cmd_uninstall" &
+    else
+        yad --plug="$key" --tabnum=3 \
+            --form --columns=1 \
+            --field="<b>$installed</b>:LBL" "" \
+            --field="Status:RO" "Sparrow connects to your local Bitcoin node over RPC." \
+            --field="Install Sparrow Wallet:FBTN" "$cmd_install" &
+    fi
 }
 
 build_about_tab() {
@@ -215,9 +371,7 @@ build_about_tab() {
     local body
     body="<b>Bitcoin on Tails</b> $(get_bot_version)
 
-A lighter-weight Bitcoin node and Sparrow wallet installer for Tails OS.
-
-Fork of <a href='https://cypherstick.com'>CipherStick</a> by Ben Westgate.
+A Bitcoin full-node installer for Tails OS. Installs Bitcoin Core or Bitcoin Knots, plus Sparrow Wallet as an optional add-on talking to your local node over RPC.
 
 <b>Source:</b> <a href='https://github.com/satscoffee/bitcoin-on-tails'>github.com/satscoffee/bitcoin-on-tails</a>
 <b>License:</b> MIT
@@ -232,7 +386,7 @@ Public key: <a href='$GPG_KEY_URL'>$GPG_KEY_URL</a>
 
 Cross-check the fingerprint against an independent source before importing."
 
-    yad --plug="$key" --tabnum=2 \
+    yad --plug="$key" --tabnum=4 \
         --form --columns=1 \
         --text="$body" \
         --text-align=left &
@@ -245,12 +399,14 @@ Cross-check the fingerprint against an independent source before importing."
 main() {
     local key=$$
     build_status_tab "$key"
+    build_bitcoin_tab "$key"
+    build_sparrow_tab "$key"
     build_about_tab "$key"
 
     yad --notebook --key="$key" \
         --title="Bitcoin on Tails" \
-        --tab="Status" --tab="About" \
-        --width=520 --height=480 \
+        --tab="Status" --tab="Bitcoin" --tab="Sparrow" --tab="About" \
+        --width=560 --height=520 \
         --button="gtk-close:0" \
         --image="$ICON_FILE" --image-on-top \
         "$ICON_ARG"

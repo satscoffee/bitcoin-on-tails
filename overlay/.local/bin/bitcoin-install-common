@@ -116,6 +116,367 @@ retry_on_fail() {
 }
 
 
+###############################################################################
+# Lifecycle helpers (--check / --update / --uninstall plumbing)
+#
+# These are pure helpers; they don't talk to the network and don't run
+# zenity. Higher-level dispatch (bot_dispatch_bitcoin) is below.
+###############################################################################
+
+bot_state_dir()    { mkdir -p "$XDG_STATE_HOME/bot" 2>/dev/null; echo "$XDG_STATE_HOME/bot"; }
+bot_cache_dir()    { mkdir -p "$XDG_CACHE_HOME/bot" 2>/dev/null; echo "$XDG_CACHE_HOME/bot"; }
+bot_marker_path()  { echo "$(bot_state_dir)/dist"; }
+bot_manifest_path(){ echo "$(bot_state_dir)/installed-files-${1}.txt"; }
+bot_check_kv_path(){ echo "$(bot_cache_dir)/check-${1}.kv"; }
+bot_latest_cache() { echo "$(bot_cache_dir)/latest-${1}.txt"; }
+
+# bot_kv_get FILE KEY → echo value or empty. Tolerates spaces in value.
+bot_kv_get() {
+    [ -s "$1" ] || return 1
+    awk -F= -v k="$2" '$1==k {sub(/^[^=]*=/, ""); print; exit}' "$1"
+}
+
+# bot_kv_write FILE key=val key=val ... → atomic full rewrite.
+bot_kv_write() {
+    local file="$1"; shift
+    local tmp; tmp="$(mktemp "${file}.XXXXXX")" || return 1
+    for kv in "$@"; do printf '%s\n' "$kv"; done > "$tmp"
+    mv -f "$tmp" "$file"
+}
+
+# bot_get_installed_dist → echoes "core" / "knots" / empty. Reads marker first
+# (cheap, deterministic). Falls back to parsing `bitcoind --version` output.
+bot_get_installed_dist() {
+    local m; m="$(bot_marker_path)"
+    if [ -s "$m" ]; then
+        head -1 "$m" | tr -d '[:space:]'
+        return
+    fi
+    if command -v bitcoind >/dev/null 2>&1; then
+        if bitcoind --version 2>/dev/null | grep -qi knots; then
+            echo "knots"
+        else
+            echo "core"
+        fi
+    fi
+}
+
+bot_get_installed_version() {
+    command -v bitcoind >/dev/null 2>&1 || return 1
+    bitcoind --version 2>/dev/null | head -1 | awk '{print $NF}' | sed 's/^v//'
+}
+
+# bot_compare_versions A B → 0 equal, 1 A<B, 2 A>B (sort -V).
+bot_compare_versions() {
+    [ "$1" = "$2" ] && return 0
+    local lo; lo="$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)"
+    [ "$lo" = "$1" ] && return 1 || return 2
+}
+
+# bot_persistence_unlocked → 0 if dotfiles+persistent are writable, else 1.
+bot_persistence_unlocked() {
+    [ -d "$DOTFILES" ] && [ -w "$DOTFILES" ] && [ -d "$SOURCE/Persistent" ]
+}
+
+bot_daemon_running() {
+    pgrep -x bitcoind >/dev/null 2>&1 || pgrep -x bitcoin-qt >/dev/null 2>&1
+}
+
+bot_data_dir_size_bytes() {
+    [ -d "$DATA_DIR" ] || { echo 0; return; }
+    du -sb "$DATA_DIR" 2>/dev/null | awk '{print $1}'
+}
+
+# bot_changelog_url SLUG VERSION → echoes upstream release-notes URL.
+bot_changelog_url() {
+    case "$1" in
+        core)    echo "https://bitcoincore.org/en/releases/$2/" ;;
+        knots)   echo "https://github.com/bitcoinknots/bitcoin/releases/tag/v$2" ;;
+        sparrow) echo "https://github.com/sparrowwallet/sparrow/releases/tag/$2" ;;
+        *)       echo "" ;;
+    esac
+}
+
+# Cache helpers: latest-<slug>.txt holds the resolved upstream version.
+# TTL gate so --check doesn't hammer upstream every minute when bot-menu refreshes.
+: "${BOT_CHECK_TTL_SECS:=600}"
+
+bot_latest_cache_fresh() {
+    local f; f="$(bot_latest_cache "$1")"
+    [ -s "$f" ] || return 1
+    local mtime; mtime=$(stat -c %Y "$f" 2>/dev/null) || return 1
+    local now; now=$(date +%s)
+    (( now - mtime <= BOT_CHECK_TTL_SECS ))
+}
+
+bot_latest_cache_read() { cat "$(bot_latest_cache "$1")" 2>/dev/null; }
+
+bot_latest_cache_write() {
+    local f; f="$(bot_latest_cache "$1")"
+    printf '%s\n' "$2" > "$f"
+}
+
+# bot_write_check_kv SLUG LATEST [STATUS] [INSTALLED_VERSION] [INSTALLED_PATH]
+# Writes the KV file bot-menu reads. STATUS is optional (default "ok"); use
+# "error" / "offline" when resolve_latest could not reach upstream.
+#
+# INSTALLED_VERSION and INSTALLED_PATH are optional overrides for callers
+# whose installed version cannot be derived from the dist marker (e.g. the
+# sparrow path: marker is "core" or "knots", so we'd otherwise look like a
+# fresh install). Passing them here writes the final KV in a single atomic
+# rename instead of forcing the caller to do a second rewrite — avoiding a
+# race with bot-menu, which polls these files.
+bot_write_check_kv() {
+    local slug="$1" latest="$2" status="${3:-ok}"
+    local override_ver="${4:-}" override_path="${5:-}"
+    local installed_dist installed_ver update_avail size daemon_state persistence
+    if [ -n "$override_ver" ]; then
+        installed_ver="$override_ver"
+    else
+        installed_dist="$(bot_get_installed_dist)"
+        if [ "$installed_dist" = "$slug" ]; then
+            installed_ver="$(bot_get_installed_version || echo)"
+        else
+            installed_ver=""
+        fi
+    fi
+    if [ -n "$installed_ver" ] && [ -n "$latest" ]; then
+        bot_compare_versions "$installed_ver" "$latest"
+        case $? in
+            1) update_avail=true ;;
+            *) update_avail=false ;;
+        esac
+    else
+        update_avail=false
+    fi
+    size="$(bot_data_dir_size_bytes)"
+    bot_daemon_running && daemon_state=true || daemon_state=false
+    bot_persistence_unlocked && persistence=true || persistence=false
+    local label src_url chg_url installed_path
+    case "$slug" in
+        core)    label="Bitcoin Core";  src_url="https://bitcoincore.org/bin/" ;;
+        knots)   label="Bitcoin Knots"; src_url="https://bitcoinknots.org/files/" ;;
+        sparrow) label="Sparrow Wallet";src_url="https://github.com/sparrowwallet/sparrow/releases" ;;
+        *)       label="$slug";         src_url="" ;;
+    esac
+    chg_url="$(bot_changelog_url "$slug" "$latest")"
+    if [ -n "$override_path" ]; then
+        installed_path="$override_path"
+    else
+        installed_path="$(command -v bitcoind 2>/dev/null || true)"
+        [ "$slug" = "sparrow" ] && installed_path="$(command -v Sparrow 2>/dev/null || true)"
+    fi
+    bot_kv_write "$(bot_check_kv_path "$slug")" \
+        "dist=$slug" \
+        "dist_label=$label" \
+        "installed_version=$installed_ver" \
+        "installed_path=$installed_path" \
+        "latest_version=$latest" \
+        "update_available=$update_avail" \
+        "last_check_unix=$(date +%s)" \
+        "last_check_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "source_url=$src_url" \
+        "changelog_url=$chg_url" \
+        "persistence_unlocked=$persistence" \
+        "data_dir=$DATA_DIR" \
+        "data_dir_size_bytes=${size:-0}" \
+        "daemon_running=$daemon_state" \
+        "check_status=$status"
+}
+
+###############################################################################
+# bot_dispatch_bitcoin SLUG LABEL "$@"
+#
+# Shared --check / --update / --uninstall handler for Core and Knots. Caller
+# must have defined a `${SLUG}_resolve_latest` function that echoes the latest
+# upstream version on stdout (and only that), exiting non-zero on failure.
+#
+# When this function returns:
+#   0 — mode handled, caller should `exit 0`
+#   1 — no mode given, caller should fall through to interactive install
+#   2 — bad mode, caller should exit non-zero
+#
+# Modes call `exit` directly on completion to keep the install body from
+# running afterward. (Sourced scripts + early-return idiom.)
+###############################################################################
+bot_dispatch_bitcoin() {
+    local slug="$1" label="$2"; shift 2
+    local mode="${1:-}"
+
+    case "$mode" in
+        --check)
+            local resolver="${slug}_resolve_latest"
+            local latest="" status="ok"
+            if bot_latest_cache_fresh "$slug"; then
+                latest="$(bot_latest_cache_read "$slug")"
+            elif latest="$("$resolver" 2>/dev/null)" && [ -n "$latest" ]; then
+                bot_latest_cache_write "$slug" "$latest"
+            else
+                status="offline"
+                latest="$(bot_latest_cache_read "$slug")"
+            fi
+            bot_write_check_kv "$slug" "$latest" "$status"
+            # Print summary for CLI users.
+            local iv; iv="$(bot_get_installed_version || echo "")"
+            if [ -n "$latest" ] && [ -n "$iv" ] && [ "$iv" != "$latest" ]; then
+                bot_compare_versions "$iv" "$latest"
+                if [ $? -eq 1 ]; then
+                    echo "$label: update available — installed $iv, latest $latest"
+                    echo "Release notes: $(bot_changelog_url "$slug" "$latest")"
+                else
+                    echo "$label: installed $iv (newer than upstream latest $latest)"
+                fi
+            elif [ -n "$latest" ]; then
+                echo "$label: up to date ($latest)"
+            else
+                echo "$label: could not reach upstream; using cached info if any"
+            fi
+            exit 0
+            ;;
+        --update)
+            # Re-enter the installer with BOT_AUTO_LATEST=1 so the caller's
+            # version-pick step picks the latest of the same major line and
+            # skips interactive prompts.
+            local installed_ver; installed_ver="$(bot_get_installed_version || echo "")"
+            if [ -z "$installed_ver" ]; then
+                echo "$label is not installed. Run \`b\` to install it." >&2
+                exit 1
+            fi
+            export BOT_AUTO_LATEST=1
+            export BOT_AUTO_LATEST_PIN_MAJOR="${installed_ver%%.*}"
+            return 1   # caller falls through to install flow
+            ;;
+        --uninstall)
+            bot_uninstall_bitcoin "$slug" "$label"
+            exit 0
+            ;;
+        --help|-h)
+            cat <<EOF
+$label installer ($slug)
+
+Usage:
+  install-$slug                Interactive install / update
+  install-$slug --check        Report installed + latest upstream version (no install)
+  install-$slug --update       Install latest patch of the currently-installed major line
+  install-$slug --uninstall    Remove $label binaries (with prompts to keep data)
+  install-$slug --help         Show this message
+EOF
+            exit 0
+            ;;
+        "")
+            return 1
+            ;;
+        *)
+            echo "Unknown mode: $mode" >&2
+            echo "Try: install-$slug --help" >&2
+            exit 2
+            ;;
+    esac
+}
+
+# bot_uninstall_bitcoin SLUG LABEL — shared uninstall flow for Core and Knots.
+# Always prompts. Defaults to KEEP for every prompt.
+bot_uninstall_bitcoin() {
+    local slug="$1" label="$2"
+    local manifest; manifest="$(bot_manifest_path "$slug")"
+
+    if ! command -v bitcoind >/dev/null 2>&1 && [ ! -s "$manifest" ]; then
+        zenity --info --title="$label not installed" \
+            --text="$label does not appear to be installed.\n\nNothing to uninstall." \
+            --ellipsize "$ICON" --icon-name=bitcoin128 2>/dev/null || \
+            echo "$label is not installed."
+        return 0
+    fi
+
+    # Confirm before doing anything.
+    if ! zenity --question --title="Uninstall $label?" \
+        --text="This will remove $label binaries from your Persistent Storage.\n\nYou will be asked separately whether to keep your wallet, chain data, and settings.\n\nProceed?" \
+        --ok-label="Continue" --cancel-label="Cancel" \
+        --width=440 "$ICON" --icon-name=dialog-question 2>/dev/null; then
+        return 0
+    fi
+
+    bot_daemon_running && stop-btc 2>/dev/null
+
+    # Decision prompts — every default is "Keep".
+    local del_chain=0 del_wallets=0 del_config=0
+    if zenity --question --title="Delete chain data?" \
+        --text="Delete the Bitcoin chain data?\n\nLocation: <tt>$DATA_DIR/blocks</tt>, <tt>chainstate</tt>, indexes\n\nThis is the synced blockchain. Deleting it means a future install will need to re-sync from scratch.\n\n<b>Default: keep.</b>" \
+        --ok-label="Delete chain data" --cancel-label="Keep" --default-cancel \
+        --width=440 "$ICON" --icon-name=drive-harddisk 2>/dev/null; then
+        del_chain=1
+    fi
+
+    if zenity --question --title="Delete wallets?" \
+        --text="Delete your Bitcoin wallet files?\n\nLocation: <tt>$DATA_DIR/wallets/</tt>\n\n<b>This is destructive — wallets contain your private keys.</b> Only do this if you have already backed up the wallets elsewhere or no longer need them.\n\n<b>Default: keep.</b>" \
+        --ok-label="Delete wallets" --cancel-label="Keep" --default-cancel \
+        --width=440 "$ICON" --icon-name=dialog-warning 2>/dev/null; then
+        del_wallets=1
+    fi
+
+    if zenity --question --title="Delete config?" \
+        --text="Delete <tt>bitcoin.conf</tt> and <tt>settings.json</tt>?\n\nLocation: <tt>$DATA_DIR/</tt> and <tt>$DOTFILES/.bitcoin/</tt>\n\n<b>Default: keep.</b>" \
+        --ok-label="Delete config" --cancel-label="Keep" --default-cancel \
+        --width=440 "$ICON" --icon-name=preferences-system 2>/dev/null; then
+        del_config=1
+    fi
+
+    # Remove binaries via manifest if present, otherwise best-effort by name.
+    # Defense in depth: reject absolute paths and any entry containing `..`,
+    # so a tampered/malformed manifest can never escape the install prefix.
+    if [ -s "$manifest" ]; then
+        while IFS= read -r rel; do
+            [ -z "$rel" ] && continue
+            case "$rel" in
+                /*|*..*) continue ;;
+            esac
+            rm -f "$LOCAL_DIR/$rel" 2>/dev/null
+            rm -f "$DOTFILES/.local/$rel" 2>/dev/null
+        done < "$manifest"
+    fi
+    # Belt-and-suspenders: known top-level binaries.
+    for b in bitcoind bitcoin-qt bitcoin-cli bitcoin-tx bitcoin-util bitcoin-wallet test_bitcoin; do
+        rm -f "$LOCAL_DIR/bin/$b" "$DOTFILES/.local/bin/$b" 2>/dev/null
+    done
+
+    # Conditional data removal.
+    if (( del_wallets )); then
+        rm -rf "$DATA_DIR/wallets" 2>/dev/null
+    fi
+    if (( del_chain )); then
+        rm -rf "$DATA_DIR/blocks" "$DATA_DIR/chainstate" \
+               "$DATA_DIR/indexes" "$DATA_DIR/mempool.dat" \
+               "$DATA_DIR/peers.dat" "$DATA_DIR/anchors.dat" \
+               "$DATA_DIR/banlist.json" "$DATA_DIR/fee_estimates.dat" 2>/dev/null
+    fi
+    if (( del_config )); then
+        rm -f "$DATA_DIR/bitcoin.conf" "$DATA_DIR/settings.json" \
+              "$DOTFILES/.bitcoin/bitcoin.conf" "$DOTFILES/.bitcoin/settings.json" \
+              "$DOTFILES/.bitcoin/README.md" 2>/dev/null
+    fi
+    # Strip from PATH cache (autostart entries, mime overrides).
+    rm -f "$DOTFILES/.config/autostart/bitcoin.desktop" 2>/dev/null
+
+    # Forget the manifest and KV cache for this slug. Only drop the dist
+    # marker if the binary is actually gone — if removal partially failed
+    # (e.g. read-only path), keeping the marker means `b --update` can still
+    # find and reinstall over the broken state instead of saying "not
+    # installed" and forcing the user into a fresh interactive picker.
+    rm -f "$manifest" \
+          "$(bot_check_kv_path "$slug")" "$(bot_latest_cache "$slug")" 2>/dev/null
+    if ! command -v bitcoind >/dev/null 2>&1 \
+        && ! command -v bitcoin-qt >/dev/null 2>&1; then
+        rm -f "$(bot_marker_path)" 2>/dev/null
+        rm -f "$XDG_STATE_HOME/installed" 2>/dev/null
+    fi
+
+    zenity --info --title="$label uninstalled" \
+        --text="$label has been removed.\n\nKept: $( ((del_chain)) || echo "chain data, ")$( ((del_wallets)) || echo "wallets, ")$( ((del_config)) || echo "config")$( ((del_chain && del_wallets && del_config)) && echo "(nothing)" )" \
+        --ellipsize "$ICON" --icon-name=bitcoin128 2>/dev/null || \
+        echo "$label uninstalled."
+}
+
+
 # Early return for callers that just want env + helpers
 [ "$1" = "--funcs-only" ] && return 0
 
@@ -220,7 +581,18 @@ else
     exit 1
 fi
 printf '\033]2;Installing %s...\a' "$DIST_LABEL"
+# Capture install manifest BEFORE extracting so --uninstall can find what to
+# remove later. Drop the top-level archive directory (matches --strip-components=1)
+# and skip directory entries.
+mkdir -p "$XDG_STATE_HOME/bot" 2>/dev/null
+tar -tf "${file_name::-4}" \
+    | sed 's|^[^/]*/||' \
+    | grep -v '/$' \
+    | grep -v '^$' \
+    > "$XDG_STATE_HOME/bot/installed-files-$DIST_SLUG.txt" 2>/dev/null || true
 tar -xvf "${file_name::-4}" --strip-components=1 --directory=$LOCAL_DIR
+# Record which implementation is installed so b/bot-menu/--check can route.
+echo "$DIST_SLUG" > "$XDG_STATE_HOME/bot/dist" 2>/dev/null || true
 rm -Rvf "$DOWNLOAD_DIR"/{download*,*.tmp,wget-log*,bin-index}
 until [ -f $XDG_DATA_HOME/bot/b ]; do sleep 1; done
 # Change mime association from electrum to bitcoin core

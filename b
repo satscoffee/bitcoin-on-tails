@@ -34,6 +34,44 @@ BOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ "$1" == "--version" ]; then
   echo "Bitcoin on Tails version $VERSION"
   exit 0
+elif [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
+  cat <<EOF
+Bitcoin on Tails $VERSION
+
+Usage:
+  b                  Install or update Bitcoin on Tails (interactive)
+  b --check          Report installed + latest upstream versions (no install)
+  b --update         Update the installed implementation to the latest patch
+  b --uninstall      Uninstall the active implementation (with prompts)
+  b --version        Print BoT version
+  b --help           Show this message
+EOF
+  exit 0
+elif [ "$1" == "--check" ] || [ "$1" == "--update" ] || [ "$1" == "--uninstall" ]; then
+  # Lifecycle dispatch — route to whichever installer is active. The marker
+  # file at $XDG_STATE_HOME/bot/dist is the source of truth; bitcoind --version
+  # is a fallback for old installs predating the marker.
+  STATE_HOME="${XDG_STATE_HOME:-/live/persistence/TailsData_unlocked/dotfiles/.local/state}"
+  marker="$STATE_HOME/bot/dist"
+  dist=""
+  if [ -s "$marker" ]; then
+    dist="$(head -1 "$marker" | tr -d '[:space:]')"
+  elif command -v bitcoind >/dev/null 2>&1; then
+    if bitcoind --version 2>/dev/null | grep -qi knots; then
+      dist="knots"
+    else
+      dist="core"
+    fi
+  fi
+  case "$dist" in
+    core|knots)
+      exec "install-$dist" "$1"
+      ;;
+    *)
+      echo "b: no Bitcoin implementation installed yet. Run \`b\` with no arguments to install one." >&2
+      exit 1
+      ;;
+  esac
 elif ! grep 'NAME="Tails"' /etc/os-release > /dev/null; then # Check for Tails OS.
     echo "
     YOU MUST RUN THIS SCRIPT IN TAILS OS!

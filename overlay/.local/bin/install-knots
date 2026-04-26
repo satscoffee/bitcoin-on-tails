@@ -40,6 +40,37 @@ export DIST_SLUG="knots"
 export BINVERIFY_MIN_GOOD_SIGS=1
 export SINGLE_SIGNER=1  # Signals the common body to skip multi-signer UI branches
 
+# knots_resolve_latest — quietly fetch the highest-numbered Knots release.
+# Used by `install-knots --check`. Two-stage scrape: major lines, then the
+# highest dated release inside the latest major.
+knots_resolve_latest() {
+    local top maj idx
+    top="$(mktemp)" || return 1
+    if ! curl -sL --fail --max-time 30 -o "$top" "$DOMAIN/files/" 2>/dev/null; then
+        rm -f "$top"; return 1
+    fi
+    maj=$(grep -oE 'href="[0-9]+\.x/"' "$top" \
+        | sed -E 's|href="||; s|/?"$||' \
+        | sort -V -u | tail -1)
+    rm -f "$top"
+    [ -n "$maj" ] || return 1
+
+    idx="$(mktemp)" || return 1
+    if ! curl -sL --fail --max-time 30 -o "$idx" "$DOMAIN/files/$maj/" 2>/dev/null; then
+        rm -f "$idx"; return 1
+    fi
+    local latest
+    latest=$(grep -oE 'href="[0-9]+\.[0-9]+(\.[0-9]+)?\.knots[0-9]{8}/"' "$idx" \
+        | sed -E 's|href="||; s|/?"$||' \
+        | sort -V -u | tail -1)
+    rm -f "$idx"
+    [ -n "$latest" ] && printf '%s\n' "$latest"
+}
+
+# Handle --check / --update / --uninstall before any interactive work.
+bot_dispatch_bitcoin knots "$DIST_LABEL" "$@" || _disp=$?
+[ "${_disp:-1}" = "2" ] && exit 1
+
 # Primary source for Luke Dashjr's public key — GitHub serves user keys over
 # plain HTTPS, which is far more reliable than hkps keyservers over Tor.
 #
@@ -73,6 +104,19 @@ if ((${#KNOTS_MAJORS[@]} == 0)); then
 fi
 
 LATEST_MAJOR="${KNOTS_MAJORS[-1]}"
+
+# --update flow: pin to the major line currently installed if it's still
+# published. Falls back to the highest available if upstream dropped that line.
+if [ "${BOT_AUTO_LATEST:-0}" = "1" ] && [ -n "${BOT_AUTO_LATEST_PIN_MAJOR:-}" ]; then
+    pinned="${BOT_AUTO_LATEST_PIN_MAJOR}.x"
+    for m in "${KNOTS_MAJORS[@]}"; do
+        if [ "$m" = "$pinned" ]; then
+            LATEST_MAJOR="$pinned"
+            echo "install-knots --update: pinning to major line $LATEST_MAJOR"
+            break
+        fi
+    done
+fi
 
 # Now scrape that major's subdir for the latest specific release
 rm -f knots-major-index
@@ -158,12 +202,17 @@ if [ -s "$KEY_CACHE_FILE" ] && ! [ luke-jr.asc -nt "$KEY_CACHE_FILE" ]; then
 else
     KEY_SOURCE_DISPLAY="$KNOTS_KEY_URL"
 fi
-if ! zenity --question \
-    --title="Confirm Bitcoin Knots install" \
-    --text="Bitcoin Knots <b>$VER</b>\n\nSigned by Luke Dashjr (single signature required).\nKey fingerprint from $KEY_SOURCE_DISPLAY:\n$FP_DISPLAY\nProceed with download and installation?" \
-    --ok-label="Install" --cancel-label="Cancel" \
-    "$ICON" --icon-name=bitcoin128; then
-    exit 1
+# Skip the confirm dialog in --update mode (user already clicked Update). The
+# downstream gpg --verify still gates integrity, so we're not relaxing the
+# trust model — just removing one click.
+if [ "${BOT_AUTO_LATEST:-0}" != "1" ]; then
+    if ! zenity --question \
+        --title="Confirm Bitcoin Knots install" \
+        --text="Bitcoin Knots <b>$VER</b>\n\nSigned by Luke Dashjr (single signature required).\nKey fingerprint from $KEY_SOURCE_DISPLAY:\n$FP_DISPLAY\nProceed with download and installation?" \
+        --ok-label="Install" --cancel-label="Cancel" \
+        "$ICON" --icon-name=bitcoin128; then
+        exit 1
+    fi
 fi
 
 # Hand off to the shared install flow

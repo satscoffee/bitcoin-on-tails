@@ -37,6 +37,30 @@ export DIST_SLUG="core"
 export BINVERIFY_MIN_GOOD_SIGS=3
 readonly GUIX_SIGS_REPO_URL="https://github.com/bitcoin-core/guix.sigs"
 
+# core_resolve_latest — quietly fetch all published Core versions and echo
+# the highest one. Used by `install-core --check`. No UI; no side effects
+# beyond network. Exits non-zero if upstream is unreachable.
+core_resolve_latest() {
+    local idx; idx="$(mktemp)" || return 1
+    if ! curl -sL --fail --max-time 30 -o "$idx" "$DOMAIN/bin/" 2>/dev/null; then
+        rm -f "$idx"; return 1
+    fi
+    local latest
+    latest=$(grep -oE 'bitcoin-core-[0-9]+(\.[0-9]+)+/' "$idx" \
+        | sed -E 's|^bitcoin-core-||; s|/$||' \
+        | sort -V -u | tail -1)
+    rm -f "$idx"
+    [ -n "$latest" ] && printf '%s\n' "$latest"
+}
+
+# Handle --check / --update / --uninstall before any interactive work.
+# bot_dispatch_bitcoin returns:
+#   0 — handled (and exits internally)
+#   1 — no mode given OR --update (caller proceeds with auto-pin install)
+#   2 — bad mode (caller exits)
+bot_dispatch_bitcoin core "$DIST_LABEL" "$@" || _disp=$?
+[ "${_disp:-1}" = "2" ] && exit 1
+
 printf '\033]2;Checking for available Bitcoin Core versions\a'
 pkill tca &>/dev/null # Close tor connection assistant
 
@@ -79,13 +103,26 @@ for m in "${TOP_MAJORS[@]}"; do
 done
 radiolist_args+=("FALSE" "__custom__" "Enter a specific version number")
 
-selected=$(zenity --list --radiolist \
-    --title="Choose a Bitcoin Core version" \
-    --text="<b>No default selected — please pick a version to install.</b>" \
-    --column="Pick" --column="Version" --column="Description" \
-    "${radiolist_args[@]}" \
-    --width=560 --height=360 \
-    "$ICON" --icon-name=bitcoin128) || exit 1
+# Auto-select for --update flow: pick latest patch of same major line as the
+# currently-installed version. If that major isn't published anymore (rare),
+# fall back to the highest published major.
+if [ "${BOT_AUTO_LATEST:-0}" = "1" ]; then
+    auto_major="${BOT_AUTO_LATEST_PIN_MAJOR:-${TOP_MAJORS[0]}}"
+    if [[ -n "${LATEST_PATCH[$auto_major]:-}" ]]; then
+        selected="${LATEST_PATCH[$auto_major]}"
+    else
+        selected="${LATEST_PATCH[${TOP_MAJORS[0]}]}"
+    fi
+    echo "install-core --update: auto-selecting Bitcoin Core $selected"
+else
+    selected=$(zenity --list --radiolist \
+        --title="Choose a Bitcoin Core version" \
+        --text="<b>No default selected — please pick a version to install.</b>" \
+        --column="Pick" --column="Version" --column="Description" \
+        "${radiolist_args[@]}" \
+        --width=560 --height=360 \
+        "$ICON" --icon-name=bitcoin128) || exit 1
+fi
 
 if [ -z "$selected" ]; then
     zenity --error --title="No version selected" --text="You must choose a Bitcoin Core version to install." --ellipsize "$ICON"
