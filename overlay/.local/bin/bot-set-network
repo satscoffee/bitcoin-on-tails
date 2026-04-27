@@ -1,0 +1,135 @@
+#!/bin/bash
+
+# Copyright (c) 2026 Bitcoin on Tails contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+###############################################################################
+# bot-set-network — change Bitcoin's network reachability after first install.
+#
+# Reads the current proxy/onion/onlynet from $DATA_DIR/settings.json, asks
+# the user (via the shared bot_pick_network helper), atomically writes the
+# new values, and stops bitcoind so the change applies on next launch.
+#
+# Network modes:
+#   tor-only  proxy=127.0.0.1:9050  onion=127.0.0.1:9050  onlynet=onion
+#   tor       proxy=127.0.0.1:9050  onion=127.0.0.1:9050  (no onlynet)
+#   clearnet  (no proxy, no onion, no onlynet)
+###############################################################################
+
+set -u
+
+export PATH="$HOME/.local/bin:/live/persistence/TailsData_unlocked/dotfiles/.local/bin:$PATH"
+export WAYLAND_DISPLAY=""
+export DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
+export DATA_DIR="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bitcoin}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$DOTFILES/.local/share}"
+export ICON="--window-icon=$XDG_DATA_HOME/icons/bot128.png"
+
+# shellcheck source=/dev/null
+. bitcoin-install-common --funcs-only
+
+settings="$DATA_DIR/settings.json"
+if [ ! -f "$settings" ]; then
+    zenity --error --title="Bitcoin not installed" \
+        --text="settings.json was not found at:\n<tt>$settings</tt>\n\nInstall Bitcoin on Tails first." \
+        --width=480 "$ICON" --icon-name=dialog-error 2>/dev/null
+    exit 1
+fi
+
+# Read the three network keys. python3 returns "" for any missing key.
+read_keys=$(python3 - "$settings" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+print(d.get("proxy", ""))
+print(d.get("onion", ""))
+print(d.get("onlynet", ""))
+PY
+)
+cur_proxy=$(printf '%s\n' "$read_keys" | sed -n '1p')
+cur_onion=$(printf '%s\n' "$read_keys" | sed -n '2p')
+cur_onlynet=$(printf '%s\n' "$read_keys" | sed -n '3p')
+
+new_mode=$(bot_pick_network "$cur_proxy" "$cur_onion" "$cur_onlynet") || exit 0
+
+# Detect "no change" so we don't bother restarting bitcoind for nothing.
+current_mode=""
+if [ -z "$cur_proxy" ] && [ -z "$cur_onion" ]; then
+    current_mode="clearnet"
+elif [ "$cur_onlynet" = "onion" ]; then
+    current_mode="tor-only"
+elif [ -n "$cur_proxy" ]; then
+    current_mode="tor"
+fi
+if [ "$new_mode" = "$current_mode" ]; then
+    zenity --info --title="No change" \
+        --text="Network setting is already <b>$new_mode</b>. Nothing to do." \
+        "$ICON" --icon-name=bitcoin128 2>/dev/null
+    exit 0
+fi
+
+# Atomic settings.json rewrite. Preserves all non-network keys (dbcache,
+# prune, server, etc.) and removes network keys not used by the new mode.
+tmp=$(mktemp)
+if ! python3 - "$settings" "$tmp" "$new_mode" <<'PY'
+import json, sys
+src, dst, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(src) as f:
+    d = json.load(f)
+# Strip any old network keys first.
+for k in ("proxy", "onion", "onlynet"):
+    d.pop(k, None)
+if mode == "tor-only":
+    d["proxy"]   = "127.0.0.1:9050"
+    d["onion"]   = "127.0.0.1:9050"
+    d["onlynet"] = "onion"
+elif mode == "tor":
+    d["proxy"]   = "127.0.0.1:9050"
+    d["onion"]   = "127.0.0.1:9050"
+# clearnet: no network keys
+with open(dst, "w") as f:
+    json.dump(d, f, indent=4)
+    f.write("\n")
+PY
+then
+    rm -f "$tmp"
+    zenity --error --title="Write failed" \
+        --text="Could not update settings.json. No changes were made." \
+        "$ICON" --icon-name=dialog-error 2>/dev/null
+    exit 1
+fi
+mv "$tmp" "$settings"
+
+# Stop bitcoind if running so the new mode applies on next launch.
+if pgrep -x bitcoin-qt >/dev/null 2>&1 || pgrep -x bitcoind >/dev/null 2>&1; then
+    zenity --info --title="Restart required" \
+        --text="Bitcoin is running. BoT will stop it now so the new network setting takes effect on the next launch." \
+        --width=480 "$ICON" --icon-name=bitcoin128 2>/dev/null
+    stop-btc 2>/dev/null || true
+fi
+
+case "$new_mode" in
+    tor-only) summary="Tor only (onion peers only)" ;;
+    tor)      summary="Tor (recommended — all traffic via Tor)" ;;
+    clearnet) summary="Clearnet (no Tor — IP exposed)" ;;
+    *)        summary="$new_mode" ;;
+esac
+
+zenity --info --title="Network setting updated" \
+    --text="Bitcoin network mode is now: <b>$summary</b>.\n\nLaunch Bitcoin from your Apps menu to start with the new setting." \
+    --width=480 "$ICON" --icon-name=bitcoin128 2>/dev/null
+
+exit 0

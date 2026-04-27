@@ -197,6 +197,25 @@ get_prune_setting() {
     fi
 }
 
+get_network_mode() {
+    local settings="$DATA_DIR/settings.json"
+    if [ ! -f "$settings" ]; then
+        echo "Not configured"
+        return
+    fi
+    local proxy onion onlynet
+    proxy=$(  grep '"proxy":'   "$settings" | cut -d\" -f4)
+    onion=$(  grep '"onion":'   "$settings" | cut -d\" -f4)
+    onlynet=$(grep '"onlynet":' "$settings" | cut -d\" -f4)
+    if [ -z "$proxy" ] && [ -z "$onion" ]; then
+        echo "Clearnet (no Tor — IP exposed)"
+    elif [ "$onlynet" = "onion" ]; then
+        echo "Tor only (onion peers only)"
+    else
+        echo "Tor (recommended)"
+    fi
+}
+
 get_sparrow_version() {
     if command -v Sparrow >/dev/null 2>&1; then
         # Sparrow --version writes "Sparrow X.Y.Z" to stdout
@@ -329,17 +348,19 @@ build_bitcoin_tab() {
     fi
     [ -z "$lv" ] && lv="(not checked yet)"
 
-    local cmd_check cmd_update cmd_uninstall cmd_changelog cmd_storage
+    local cmd_check cmd_update cmd_uninstall cmd_changelog cmd_storage cmd_network
     if [ -n "$dist" ]; then
         cmd_check="$(mk_action "BoT — checking $label" "install-$dist --check")"
         cmd_update="$(mk_action "BoT — updating $label" "install-$dist --update")"
         cmd_uninstall="$(mk_action "BoT — uninstalling $label" "install-$dist --uninstall")"
         cmd_storage="bot-set-prune >/dev/null 2>&1 &"
+        cmd_network="bot-set-network >/dev/null 2>&1 &"
     else
         cmd_check="$(mk_action 'BoT — install Bitcoin' 'b')"
         cmd_update="$cmd_check"
         cmd_uninstall=":"
         cmd_storage="zenity --info --title='Bitcoin not installed' --text='Install Bitcoin first, then you can change pruning here.' --width=420 $ICON_ARG &"
+        cmd_network="zenity --info --title='Bitcoin not installed' --text='Install Bitcoin first, then you can change the network mode here.' --width=420 $ICON_ARG &"
     fi
     if [ -n "$chg" ]; then
         cmd_changelog="xdg-open $(printf '%q' "$chg") >/dev/null 2>&1 &"
@@ -347,10 +368,11 @@ build_bitcoin_tab() {
         cmd_changelog="zenity --info --title='No release notes' --text='No changelog URL on file. Click Check for updates first.' --ellipsize $ICON_ARG &"
     fi
 
-    # Surface the active prune setting on the tab so the user can see what
-    # they have without opening the picker.
-    local prune_line
+    # Surface active config on the tab so the user can see what they have
+    # without opening the pickers.
+    local prune_line network_line
     prune_line="$(get_prune_setting)"
+    network_line="$(get_network_mode)"
 
     yad --plug="$key" --tabnum=2 \
         --form --columns=1 \
@@ -359,10 +381,12 @@ build_bitcoin_tab() {
         --field="Latest published:RO" "$lv" \
         --field="Status:RO" "$status_line" \
         --field="Storage (prune):RO" "$prune_line" \
+        --field="Network:RO" "$network_line" \
         --field="Check for updates:FBTN" "$cmd_check" \
         --field="What's changed:FBTN" "$cmd_changelog" \
         --field="Update now:FBTN" "$cmd_update" \
         --field="Change storage…:FBTN" "$cmd_storage" \
+        --field="Change network…:FBTN" "$cmd_network" \
         --field="Uninstall:FBTN" "$cmd_uninstall" &
 }
 

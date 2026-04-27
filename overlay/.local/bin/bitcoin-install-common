@@ -589,6 +589,96 @@ bot_pick_prune() {
 }
 
 
+###############################################################################
+# Network UX. Used at first-install (no current value) and post-install via
+# bot-set-network (current value loaded from settings.json).
+#
+# bot_pick_network [CURRENT_PROXY] [CURRENT_ONION] [CURRENT_ONLYNET]
+#
+# Echoes the chosen mode token: "tor-only", "tor", or "clearnet".
+# Returns non-zero if the user cancels.
+#
+# Mode mapping:
+#   tor-only   proxy=127.0.0.1:9050  onion=127.0.0.1:9050  onlynet=onion
+#   tor        proxy=127.0.0.1:9050  onion=127.0.0.1:9050  (no onlynet)
+#   clearnet   (no proxy, no onion, no onlynet)
+###############################################################################
+bot_pick_network() {
+    local cur_proxy="${1:-}" cur_onion="${2:-}" cur_onlynet="${3:-}"
+    local pre_tor_only=FALSE pre_tor=FALSE pre_clearnet=FALSE current_line=""
+
+    # Detect which preset matches the current settings.json. Empty proxy +
+    # empty onion = clearnet. proxy set + onlynet=onion = Tor-only. Anything
+    # else with proxy set = Tor (recommended).
+    if [ -z "$cur_proxy" ] && [ -z "$cur_onion" ] && [ -z "$cur_onlynet" ]; then
+        # First install — no current setting; default to Tor (recommended).
+        pre_tor=TRUE
+    elif [ -z "$cur_proxy" ] && [ -z "$cur_onion" ]; then
+        pre_clearnet=TRUE
+        current_line="\n\n<i>Current setting: Clearnet (no Tor).</i>"
+    elif [ "$cur_onlynet" = "onion" ]; then
+        pre_tor_only=TRUE
+        current_line="\n\n<i>Current setting: Tor only (onion peers only).</i>"
+    else
+        pre_tor=TRUE
+        current_line="\n\n<i>Current setting: Tor (recommended).</i>"
+    fi
+
+    local explainer
+    explainer="<b>How should Bitcoin reach the network?</b>
+
+<b>Tor only</b> — onion peers only
+  • Most private — every peer is reached over Tor.
+  • Smaller peer pool, so the initial sync runs slower.
+  • Resistant to network surveillance and IP geolocation.
+
+<b>Tor (recommended)</b> — Tor for everything, mixed peers
+  • Your IP stays hidden — all traffic is routed through Tor.
+  • Larger peer pool (onion + clearnet via Tor exits) → faster sync.
+  • This is the BoT default and the right choice on Tails.
+
+<b>Clearnet</b> — direct connections, no Tor
+  • <b>Your IP address is exposed to every peer you connect to.</b>
+  • Fastest connections — no Tor overhead.
+  • Tails blocks non-Tor traffic by default; this option only works
+    outside Tails or with a manually configured exception.${current_line}"
+
+    local choice
+    choice=$(zenity --list --radiolist \
+        --title="Bitcoin network settings" \
+        --text="$explainer" \
+        --column="Pick" --column="Mode" --column="Notes" \
+        "$pre_tor_only" "tor-only" "Onion peers only — most private, slowest" \
+        "$pre_tor"      "tor"      "All traffic via Tor — recommended (BoT default)" \
+        "$pre_clearnet" "clearnet" "No Tor — fastest, but exposes your IP" \
+        --width=760 --height=600 \
+        "$ICON" --icon-name=bitcoin128) || return 1
+
+    case "$choice" in
+        tor-only)
+            zenity --question \
+                --title="Confirm: Tor only" \
+                --text="<b>Tor only</b> connects to onion peers only. Initial blockchain sync will be slower than the recommended setting.\n\nProceed?" \
+                --width=480 "$ICON" --icon-name=bitcoin128 || return 1
+            echo "tor-only"
+            ;;
+        tor)
+            echo "tor"
+            ;;
+        clearnet)
+            zenity --question \
+                --title="Warning: your IP will be exposed" \
+                --text="<b>Clearnet mode connects directly without Tor. Every Bitcoin peer will see your real IP address.</b>\n\n• Tails blocks non-Tor traffic by default — this option will not work on a stock Tails system.\n• Only choose this if you are running outside Tails or have manually opened an exception.\n\nProceed?" \
+                --width=560 "$ICON" --icon-name=dialog-warning || return 1
+            echo "clearnet"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+
 # Early return for callers that just want env + helpers
 [ "$1" = "--funcs-only" ] && return 0
 
@@ -753,13 +843,45 @@ else
     # the same assumed sizes later without a fresh network probe.
     install -D -m 0644 "$DOWNLOAD_DIR/chainparams.cpp" \
         "$XDG_DATA_HOME/bot/chainparams.cpp" 2>/dev/null || true
-    echo '{
-        "dbcache": "450",
-        "onion": "127.0.0.1:9050",
-        "proxy": "127.0.0.1:9050",
-        "prune": "'$prune_MiB'",
-        "server": true
-    }' > $DATA_DIR/settings.json # Enable server, proxies for Tor and prune
+
+    # Ask which network mode to use. Falls back to Tor (recommended) on cancel
+    # so the install never wedges and the user is never accidentally on
+    # clearnet with their IP exposed.
+    network_mode=$(bot_pick_network) || network_mode="tor"
+    case "$network_mode" in
+        tor-only)
+            cat > "$DATA_DIR/settings.json" <<JSON
+{
+    "dbcache": "450",
+    "onion": "127.0.0.1:9050",
+    "proxy": "127.0.0.1:9050",
+    "onlynet": "onion",
+    "prune": "$prune_MiB",
+    "server": true
+}
+JSON
+            ;;
+        clearnet)
+            cat > "$DATA_DIR/settings.json" <<JSON
+{
+    "dbcache": "450",
+    "prune": "$prune_MiB",
+    "server": true
+}
+JSON
+            ;;
+        tor|*)
+            cat > "$DATA_DIR/settings.json" <<JSON
+{
+    "dbcache": "450",
+    "onion": "127.0.0.1:9050",
+    "proxy": "127.0.0.1:9050",
+    "prune": "$prune_MiB",
+    "server": true
+}
+JSON
+            ;;
+    esac
 
 
     if ((prune_MiB)); then
