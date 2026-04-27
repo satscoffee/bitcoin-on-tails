@@ -39,6 +39,19 @@ export XDG_STATE_HOME="${XDG_STATE_HOME:-$DOTFILES/.local/state}"
 export ICON_FILE="$XDG_DATA_HOME/icons/bot128.png"
 export ICON_ARG="--window-icon=$ICON_FILE"
 
+# .desktop launchers (Apps menu) do not source ~/.profile, so PATH may be
+# missing ~/.local/bin and $DOTFILES/.local/bin. Without those on PATH every
+# `command -v bitcoind` / `command -v Sparrow` check below returns false and
+# the UI incorrectly reports "Not installed". Prepend explicitly so detection
+# works whether bot-menu was launched from a terminal or the Apps menu.
+for _bot_path in "$HOME/.local/bin" "$DOTFILES/.local/bin"; do
+    case ":$PATH:" in
+        *":$_bot_path:"*) ;;
+        *) export PATH="$_bot_path:$PATH" ;;
+    esac
+done
+unset _bot_path
+
 CHECK_KV_DIR="$XDG_CACHE_HOME/bot"
 DIST_MARKER="$XDG_STATE_HOME/bot/dist"
 
@@ -272,10 +285,15 @@ build_status_tab() {
 # Action-button helpers. yad FBTN runs the command through /bin/sh -c.
 # We launch each action in a fresh terminal so the user sees the install
 # script's output (these are interactive in --update mode).
+#
+# The terminal spawns `bash -lc` (login shell) so it sources ~/.profile and
+# inherits PATH including ~/.local/bin / $DOTFILES/.local/bin. Without -l,
+# bash -c runs as a non-login non-interactive shell with the .desktop
+# launcher's stripped PATH and `b: command not found` follows.
 mk_action() {
     # mk_action TITLE COMMAND
     local title="$1" cmd="$2"
-    printf 'x-terminal-emulator -T %q -e bash -c %q &' "$title" \
+    printf 'x-terminal-emulator -T %q -e bash -lc %q &' "$title" \
         "$cmd; echo; echo Press any key to close.; read -r -n 1"
 }
 

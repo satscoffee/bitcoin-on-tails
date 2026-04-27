@@ -40,12 +40,62 @@ Bitcoin on Tails $VERSION
 
 Usage:
   b                  Install or update Bitcoin on Tails (interactive)
-  b --check          Report installed + latest upstream versions (no install)
+  b --status         Print a snapshot of what's installed (no network)
+  b --check          Report installed + latest upstream versions (one network probe)
   b --update         Update the installed implementation to the latest patch
   b --uninstall      Uninstall the active implementation (with prompts)
   b --version        Print BoT version
   b --help           Show this message
 EOF
+  exit 0
+elif [ "$1" == "--status" ]; then
+  # Read-only status snapshot. No rsync, no install dialogs, no network.
+  STATE_HOME="${XDG_STATE_HOME:-/live/persistence/TailsData_unlocked/dotfiles/.local/state}"
+  CACHE_HOME="${XDG_CACHE_HOME:-/live/persistence/TailsData_unlocked/dotfiles/.cache}"
+  marker="$STATE_HOME/bot/dist"
+  echo "Bitcoin on Tails $VERSION"
+  echo
+  if [ -s "$marker" ]; then
+      dist="$(head -1 "$marker" | tr -d '[:space:]')"
+      case "$dist" in
+          core)  echo "Implementation: Bitcoin Core"  ;;
+          knots) echo "Implementation: Bitcoin Knots" ;;
+          *)     echo "Implementation: $dist (unknown marker value)" ;;
+      esac
+  elif command -v bitcoind >/dev/null 2>&1; then
+      if bitcoind --version 2>/dev/null | grep -qi knots; then
+          echo "Implementation: Bitcoin Knots (no marker — pre-marker install)"
+      else
+          echo "Implementation: Bitcoin Core (no marker — pre-marker install)"
+      fi
+  else
+      echo "Implementation: not installed"
+  fi
+  if command -v bitcoind >/dev/null 2>&1; then
+      echo "Bitcoin version: $(bitcoind --version 2>/dev/null | head -1 | awk '{print $NF}')"
+      if bitcoin-cli -datadir="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bitcoin}" getblockchaininfo >/dev/null 2>&1; then
+          echo "Daemon: running"
+      else
+          echo "Daemon: not running"
+      fi
+  fi
+  if command -v Sparrow >/dev/null 2>&1 || [ -x "${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}/.local/bin/Sparrow" ]; then
+      echo "Sparrow: installed"
+  else
+      echo "Sparrow: not installed"
+  fi
+  for slug in core knots sparrow; do
+      kv="$CACHE_HOME/bot/check-$slug.kv"
+      [ -s "$kv" ] || continue
+      iv=$(awk -F= '$1=="installed_version"{sub(/^[^=]*=/,""); print; exit}' "$kv")
+      lv=$(awk -F= '$1=="latest_version"   {sub(/^[^=]*=/,""); print; exit}' "$kv")
+      avail=$(awk -F= '$1=="update_available"{sub(/^[^=]*=/,""); print; exit}' "$kv")
+      iso=$(awk -F= '$1=="last_check_iso" {sub(/^[^=]*=/,""); print; exit}' "$kv")
+      [ -z "$lv" ] && continue
+      printf 'Last %s check: %s — installed %s, latest %s%s\n' \
+          "$slug" "$iso" "${iv:--}" "$lv" \
+          "$( [ "$avail" = "true" ] && echo " (update available)")"
+  done
   exit 0
 elif [ "$1" == "--check" ] || [ "$1" == "--update" ] || [ "$1" == "--uninstall" ]; then
   # Lifecycle dispatch — route to whichever installer is active. The marker
