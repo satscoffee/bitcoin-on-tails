@@ -637,11 +637,15 @@ bot_pick_network() {
   • Larger peer pool (onion + clearnet via Tor exits) → faster sync.
   • This is the BoT default and the right choice on Tails.
 
-<b>Clearnet</b> — direct connections, no Tor
-  • <b>Your IP address is exposed to every peer you connect to.</b>
-  • Fastest connections — no Tor overhead.
-  • Tails blocks non-Tor traffic by default; this option only works
-    outside Tails or with a manually configured exception.${current_line}"
+<b>Clearnet</b> — no Tor
+  • <b>Will NOT work on a stock Tails system.</b> Tails firewalls all
+    non-Tor traffic at the kernel level, so Bitcoin would silently
+    fail to find any peers and never sync.
+  • Useful only when this Persistent Storage USB is later booted on
+    a regular Linux system (BoT's data lives on the USB, so it's
+    portable).
+  • Outside Tails: fastest connections, but every Bitcoin peer sees
+    your real IP address.${current_line}"
 
     local choice
     choice=$(zenity --list --radiolist \
@@ -650,7 +654,7 @@ bot_pick_network() {
         --column="Pick" --column="Mode" --column="Notes" \
         "$pre_tor_only" "tor-only" "Onion peers only — most private, slowest" \
         "$pre_tor"      "tor"      "All traffic via Tor — recommended (BoT default)" \
-        "$pre_clearnet" "clearnet" "No Tor — fastest, but exposes your IP" \
+        "$pre_clearnet" "clearnet" "No Tor — won't work on stock Tails" \
         --width=760 --height=600 \
         "$ICON" --icon-name=bitcoin128) || return 1
 
@@ -667,15 +671,69 @@ bot_pick_network() {
             ;;
         clearnet)
             zenity --question \
-                --title="Warning: your IP will be exposed" \
-                --text="<b>Clearnet mode connects directly without Tor. Every Bitcoin peer will see your real IP address.</b>\n\n• Tails blocks non-Tor traffic by default — this option will not work on a stock Tails system.\n• Only choose this if you are running outside Tails or have manually opened an exception.\n\nProceed?" \
-                --width=560 "$ICON" --icon-name=dialog-warning || return 1
+                --title="Clearnet mode — won't work on Tails" \
+                --text="<b>Clearnet mode disables Tor for Bitcoin.</b>\n\n<b>On Tails (your current OS):</b> the Tails firewall blocks all non-Tor outbound traffic at the kernel. Bitcoin will appear to start but will silently never find any peers — no sync, no transactions, nothing.\n\n<b>Outside Tails:</b> this setting takes effect. Bitcoin connects directly to peers and your real IP address is visible to every one of them.\n\nPick this only if you plan to boot this USB on a regular Linux system. Proceed?" \
+                --width=600 "$ICON" --icon-name=dialog-warning || return 1
             echo "clearnet"
             ;;
         *)
             return 1
             ;;
     esac
+}
+
+
+###############################################################################
+# bot_remove_impl_binaries SLUG — silently remove a Bitcoin implementation's
+# binaries (using the install manifest) without touching chain data, wallets,
+# bitcoin.conf, or settings.json. No prompts, no zenity. Used by the switch-
+# implementation flow where the user is intentionally swapping Core ↔ Knots
+# (or reinstalling the same impl at a different version) and explicitly does
+# NOT want to be asked about deleting their data on every transition.
+#
+# Returns 0 even if the manifest is missing — it's a best-effort cleanup so
+# the subsequent install can lay down a clean tree without stale binaries
+# (e.g. Core's bitcoin-tx left over after switching to Knots).
+###############################################################################
+bot_remove_impl_binaries() {
+    local slug="$1"
+    [ -n "$slug" ] || return 0
+    local manifest; manifest="$(bot_manifest_path "$slug")"
+
+    # Stop daemon — install scripts also do this, but if we leave it running
+    # while ripping out binaries the user could end up with a half-running
+    # bitcoind and a partially-replaced binary tree.
+    bot_daemon_running && stop-btc 2>/dev/null
+
+    # Remove files listed in the manifest, with the same path-traversal
+    # guards as bot_uninstall_bitcoin so a tampered manifest can't escape
+    # the install prefix.
+    if [ -s "$manifest" ]; then
+        local rel
+        while IFS= read -r rel; do
+            [ -z "$rel" ] && continue
+            case "$rel" in
+                /*|*..*) continue ;;
+            esac
+            rm -f "$LOCAL_DIR/$rel" 2>/dev/null
+            rm -f "$DOTFILES/.local/$rel" 2>/dev/null
+        done < "$manifest"
+    fi
+    # Belt-and-suspenders: known top-level Bitcoin binaries. Catches old
+    # manifests that may not list every helper, and ensures no stale binary
+    # from the previous impl survives `command -v bitcoind` etc.
+    local b
+    for b in bitcoind bitcoin-qt bitcoin-cli bitcoin-tx bitcoin-util bitcoin-wallet test_bitcoin; do
+        rm -f "$LOCAL_DIR/bin/$b" "$DOTFILES/.local/bin/$b" 2>/dev/null
+    done
+
+    # Forget the old manifest + cached upstream-version probe. The dist
+    # marker is intentionally NOT cleared here: the install script we exec
+    # next will overwrite it with the new slug, and clearing it now would
+    # briefly confuse `b --check` if anything ran in between.
+    rm -f "$manifest" "$(bot_latest_cache "$slug")" "$(bot_check_kv_path "$slug")" 2>/dev/null
+
+    return 0
 }
 
 

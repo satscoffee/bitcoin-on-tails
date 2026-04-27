@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# Copyright (c) 2026 Bitcoin on Tails contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+###############################################################################
+# bot-switch-impl — change the active Bitcoin implementation after first
+# install, OR reinstall the current implementation at a different version.
+#
+# Detects the currently-installed implementation (Core vs Knots) via the
+# dist marker (with `bitcoin-cli --version` as a fallback for pre-marker
+# installs), asks the user what they want to do, removes only the previous
+# binaries (chain data, wallets, bitcoin.conf, and settings.json are kept
+# untouched), and then execs the matching install-{core,knots} script. Both
+# Core and Knots share the same on-disk chain format and DATA_DIR layout, so
+# swapping between them is just a binary swap from the user's perspective.
+#
+# What this script will NOT touch:
+#   • $DATA_DIR/blocks, chainstate, indexes, wallets/, mempool.dat
+#   • $DATA_DIR/settings.json (prune, network, etc.)
+#   • $DOTFILES/.bitcoin/bitcoin.conf
+#
+# What this script WILL touch:
+#   • Files listed in $XDG_STATE_HOME/bot/installed-files-<slug>.txt
+#   • Known bitcoind helper binaries (defense in depth)
+#   • The dist marker — overwritten by the install script we exec next
+###############################################################################
+
+set -u
+
+export PATH="$HOME/.local/bin:/live/persistence/TailsData_unlocked/dotfiles/.local/bin:$PATH"
+export WAYLAND_DISPLAY=""
+export DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
+export DATA_DIR="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bitcoin}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$DOTFILES/.local/share}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-$DOTFILES/.local/state}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$DOTFILES/.cache}"
+export ICON="--window-icon=$XDG_DATA_HOME/icons/bot128.png"
+
+# shellcheck source=/dev/null
+. bitcoin-install-common --funcs-only
+
+# Detect currently-installed implementation. If nothing is installed there's
+# nothing to switch — point the user at first-install instead.
+current="$(bot_get_installed_dist)"
+if [ -z "$current" ]; then
+    zenity --error --title="No Bitcoin implementation installed" \
+        --text="There is no Bitcoin Core or Bitcoin Knots install on this system yet.\n\nRun <tt>b</tt> from a terminal to install one first." \
+        --width=480 "$ICON" --icon-name=dialog-error 2>/dev/null
+    exit 1
+fi
+
+case "$current" in
+    core)  current_label="Bitcoin Core"  ;;
+    knots) current_label="Bitcoin Knots" ;;
+    *)
+        zenity --error --title="Unknown implementation" \
+            --text="The dist marker at <tt>$XDG_STATE_HOME/bot/dist</tt> contains an unrecognized value: <tt>$current</tt>\n\nPlease uninstall and reinstall to recover." \
+            --width=520 "$ICON" --icon-name=dialog-error 2>/dev/null
+        exit 1
+        ;;
+esac
+
+current_ver="$(bot_get_installed_version 2>/dev/null || echo "")"
+
+# Build the picker. Always offer: switch to the OTHER implementation, OR
+# reinstall the CURRENT implementation at a different version. Reinstall
+# is useful for patching to a newer minor (Core), pinning to a custom
+# version (Core's installer has a "__custom__" entry), or refreshing
+# Knots to whatever upstream now considers "latest".
+explainer="<b>Current implementation: $current_label${current_ver:+ $current_ver}</b>
+
+Switching between Core and Knots — or reinstalling at a different version — only replaces the Bitcoin binaries on this USB.
+
+<b>Your data is preserved:</b>
+  • Chain data (blocks, chainstate, indexes)
+  • Wallets in <tt>$DATA_DIR/wallets/</tt>
+  • <tt>bitcoin.conf</tt> and <tt>settings.json</tt> (prune, network, etc.)
+
+<b>What does change:</b>
+  • The <tt>bitcoind</tt> / <tt>bitcoin-qt</tt> binaries are replaced.
+  • The first launch after a switch may run a brief consistency check on the chain — this is normal."
+
+if [ "$current" = "core" ]; then
+    other="knots";  other_label="Bitcoin Knots"
+else
+    other="core";   other_label="Bitcoin Core"
+fi
+
+choice=$(zenity --list --radiolist \
+    --title="Change Bitcoin implementation" \
+    --text="$explainer" \
+    --column="Pick" --column="Action" --column="Notes" \
+    FALSE "switch"    "Switch to $other_label" \
+    FALSE "reinstall" "Reinstall $current_label (lets you pick a different version)" \
+    --width=720 --height=480 \
+    "$ICON" --icon-name=bitcoin128) || exit 0
+
+case "$choice" in
+    switch)
+        target="$other"; target_label="$other_label"; verb="Switch"
+        prompt_text="<b>Switch from $current_label to $target_label?</b>\n\nYour chain data, wallets, and settings will be preserved. Only the binaries change.\n\nThe next step will download and verify $target_label's release, then replace the $current_label binaries on your USB."
+        ;;
+    reinstall)
+        target="$current"; target_label="$current_label"; verb="Reinstall"
+        prompt_text="<b>Reinstall $current_label?</b>\n\nYour chain data, wallets, and settings will be preserved. The current binaries will be replaced with whichever version you pick on the next screen.\n\nProceed?"
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+
+if ! zenity --question \
+    --title="$verb to $target_label?" \
+    --text="$prompt_text" \
+    --ok-label="Continue" --cancel-label="Cancel" \
+    --width=520 "$ICON" --icon-name=bitcoin128 2>/dev/null; then
+    exit 0
+fi
+
+# Stop the daemon (helper handles "not running" gracefully) and remove the
+# old impl's files via its install manifest. Crucially, this leaves chain
+# data, wallets, bitcoin.conf, and settings.json alone — the user has been
+# explicit about wanting to swap binaries only.
+bot_remove_impl_binaries "$current"
+
+# Hand off to the matching installer. The install script handles its own
+# version pickers, signature verification, and dist-marker write. Use exec
+# so the user sees the install script's terminal output without an extra
+# layer of subshell.
+exec "install-$target"

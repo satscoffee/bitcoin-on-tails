@@ -348,19 +348,21 @@ build_bitcoin_tab() {
     fi
     [ -z "$lv" ] && lv="(not checked yet)"
 
-    local cmd_check cmd_update cmd_uninstall cmd_changelog cmd_storage cmd_network
+    local cmd_check cmd_update cmd_uninstall cmd_changelog cmd_storage cmd_network cmd_switch
     if [ -n "$dist" ]; then
         cmd_check="$(mk_action "BoT — checking $label" "install-$dist --check")"
         cmd_update="$(mk_action "BoT — updating $label" "install-$dist --update")"
         cmd_uninstall="$(mk_action "BoT — uninstalling $label" "install-$dist --uninstall")"
         cmd_storage="bot-set-prune >/dev/null 2>&1 &"
         cmd_network="bot-set-network >/dev/null 2>&1 &"
+        cmd_switch="$(mk_action 'BoT — change implementation' 'bot-switch-impl')"
     else
         cmd_check="$(mk_action 'BoT — install Bitcoin' 'b')"
         cmd_update="$cmd_check"
         cmd_uninstall=":"
         cmd_storage="zenity --info --title='Bitcoin not installed' --text='Install Bitcoin first, then you can change pruning here.' --width=420 $ICON_ARG &"
         cmd_network="zenity --info --title='Bitcoin not installed' --text='Install Bitcoin first, then you can change the network mode here.' --width=420 $ICON_ARG &"
+        cmd_switch="zenity --info --title='Bitcoin not installed' --text='Install Bitcoin first, then you can switch between Core and Knots here.' --width=420 $ICON_ARG &"
     fi
     if [ -n "$chg" ]; then
         cmd_changelog="xdg-open $(printf '%q' "$chg") >/dev/null 2>&1 &"
@@ -387,6 +389,7 @@ build_bitcoin_tab() {
         --field="Update now:FBTN" "$cmd_update" \
         --field="Change storage…:FBTN" "$cmd_storage" \
         --field="Change network…:FBTN" "$cmd_network" \
+        --field="Change implementation…:FBTN" "$cmd_switch" \
         --field="Uninstall:FBTN" "$cmd_uninstall" &
 }
 
