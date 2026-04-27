@@ -293,8 +293,12 @@ build_status_tab() {
 mk_action() {
     # mk_action TITLE COMMAND
     local title="$1" cmd="$2"
+    # `read -s` (silent) avoids echoing the keypress next to the terminal's
+    # own "command exited" footer, which previously rendered as garbled text
+    # like "read only-command exited". Prompt with Enter for predictability
+    # across gnome-terminal / xterm / terminator.
     printf 'x-terminal-emulator -T %q -e bash -lc %q &' "$title" \
-        "$cmd; echo; echo Press any key to close.; read -r -n 1"
+        "$cmd; echo; printf %s \"Press Enter to close. \"; read -rs _; echo"
 }
 
 build_bitcoin_tab() {
@@ -308,7 +312,21 @@ build_bitcoin_tab() {
     chg=$(kv_get "$kv" changelog_url || true)
     status_line="$(update_status_line "${dist:-core}")"
     [ -z "$status_line" ] && status_line="No check on file. Click \"Check for updates\" to fetch."
-    [ -z "$dist" ] && label="Not installed yet"
+
+    # Live fallbacks so the tab is informative on first open (before any
+    # --check has populated the KV cache).
+    if [ -z "$label" ]; then
+        case "$dist" in
+            core)  label="Bitcoin Core"  ;;
+            knots) label="Bitcoin Knots" ;;
+            "")    label="Not installed yet" ;;
+            *)     label="$dist" ;;
+        esac
+    fi
+    if [ -z "$iv" ] && [ -n "$dist" ]; then
+        iv="$(get_bitcoin_version)"
+    fi
+    [ -z "$lv" ] && lv="(not checked yet)"
 
     local cmd_check cmd_update cmd_uninstall cmd_changelog
     if [ -n "$dist" ]; then
@@ -330,7 +348,7 @@ build_bitcoin_tab() {
         --form --columns=1 \
         --field="<b>${label}</b>:LBL" "" \
         --field="Installed version:RO" "${iv:-—}" \
-        --field="Latest published:RO" "${lv:-—}" \
+        --field="Latest published:RO" "$lv" \
         --field="Status:RO" "$status_line" \
         --field="Check for updates:FBTN" "$cmd_check" \
         --field="What's changed:FBTN" "$cmd_changelog" \
@@ -353,6 +371,17 @@ build_sparrow_tab() {
         installed="Sparrow Wallet (not installed)"
     fi
 
+    # Live fallbacks so first-open shows real data before --check has run.
+    if [ -z "$iv" ] && [ -x "$DOTFILES/.local/bin/Sparrow" ]; then
+        iv="$(get_sparrow_version)"
+        # get_sparrow_version returns "Not installed" / "installed" sentinels
+        # if --version doesn't parse — clamp those to empty so we show "—".
+        case "$iv" in
+            "Not installed"|"installed"|"") iv="" ;;
+        esac
+    fi
+    [ -z "$lv" ] && lv="(not checked yet)"
+
     local cmd_check cmd_install cmd_update cmd_uninstall cmd_changelog
     cmd_check="$(mk_action 'BoT — checking Sparrow' 'install-sparrow --check')"
     cmd_install="$(mk_action 'BoT — installing Sparrow' 'install-sparrow')"
@@ -369,7 +398,7 @@ build_sparrow_tab() {
             --form --columns=1 \
             --field="<b>$installed</b>:LBL" "" \
             --field="Installed version:RO" "${iv:-—}" \
-            --field="Latest published:RO" "${lv:-—}" \
+            --field="Latest published:RO" "$lv" \
             --field="Status:RO" "$status_line" \
             --field="Check for updates:FBTN" "$cmd_check" \
             --field="What's changed:FBTN" "$cmd_changelog" \
