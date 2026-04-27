@@ -293,12 +293,13 @@ build_status_tab() {
 mk_action() {
     # mk_action TITLE COMMAND
     local title="$1" cmd="$2"
-    # `read -s` (silent) avoids echoing the keypress next to the terminal's
-    # own "command exited" footer, which previously rendered as garbled text
-    # like "read only-command exited". Prompt with Enter for predictability
-    # across gnome-terminal / xterm / terminator.
+    # Single-key wait. `-s` suppresses echoing the keypress (avoids garbled
+    # "<key>command exited" footer), `-n 1` ends on first byte, and `-p`
+    # writes the prompt to stderr so it shows even when stdout is buffered.
+    # Trailing `echo` puts the cursor on a fresh line before the terminal
+    # emulator paints its own "Process exited" footer.
     printf 'x-terminal-emulator -T %q -e bash -lc %q &' "$title" \
-        "$cmd; echo; printf %s \"Press Enter to close. \"; read -rs _; echo"
+        "$cmd; echo; read -rsn 1 -p 'Press any key to close. ' _; echo"
 }
 
 build_bitcoin_tab() {

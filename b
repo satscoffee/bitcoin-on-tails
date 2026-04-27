@@ -200,13 +200,14 @@ else
         rsync -rvh "$BOT_DIR"/ "$INSTALLED_BOT_DIR"
         link-dotfiles
         wait
-        if [ "$dev_choice" = "menu" ]; then
-            exec bot-menu
-        fi
+        # Always confirm the refresh succeeded, then launch bot-menu so the
+        # user sees their changes immediately. --width forces full text;
+        # --ellipsize was previously truncating both lines mid-word.
         zenity --info --title="Scripts refreshed" \
-            --text="BoT scripts have been synced into Persistent Storage at <b>$VERSION</b>.\n\nFrom any terminal you can now test:\n<tt>b --check</tt>, <tt>b --update</tt>, <tt>b --uninstall</tt>, or <tt>bot-menu</tt>." \
-            --ellipsize "$ICON" --icon-name=bitcoin128
-        exit 0
+            --width=560 \
+            --text="BoT scripts have been synced into Persistent Storage at <b>$VERSION</b>.\n\nFrom any terminal you can now test:\n<tt>b --check</tt>, <tt>b --update</tt>, <tt>b --uninstall</tt>, or <tt>bot-menu</tt>.\n\nThe BoT control panel will open next." \
+            "$ICON" --icon-name=bitcoin128
+        exec bot-menu
         ;;
       reinstall)
         # Fall through to the standard first-install flow below.
