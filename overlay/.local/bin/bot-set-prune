@@ -1,0 +1,147 @@
+#!/bin/bash
+
+# Copyright (c) 2026 Bitcoin on Tails contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+###############################################################################
+# bot-set-prune — change the Bitcoin pruning setting after first install.
+#
+# Reads the current `prune` from $DATA_DIR/settings.json, asks the user
+# (via the shared bot_pick_prune helper) what they want, warns about
+# anything destructive (notably going pruned → archival, which requires a
+# full re-sync), writes settings.json atomically, and stops bitcoind so
+# the user can relaunch with the new setting.
+###############################################################################
+
+set -u
+
+export PATH="$HOME/.local/bin:/live/persistence/TailsData_unlocked/dotfiles/.local/bin:$PATH"
+export WAYLAND_DISPLAY=""
+export DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
+export DATA_DIR="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bitcoin}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$DOTFILES/.local/share}"
+export ICON="--window-icon=$XDG_DATA_HOME/icons/bot128.png"
+
+# Pull in env exports + helpers (including bot_pick_prune).
+# shellcheck source=/dev/null
+. bitcoin-install-common --funcs-only
+
+settings="$DATA_DIR/settings.json"
+if [ ! -f "$settings" ]; then
+    zenity --error --title="Bitcoin not installed" \
+        --text="settings.json was not found at:\n<tt>$settings</tt>\n\nInstall Bitcoin on Tails first." \
+        --width=480 "$ICON" --icon-name=dialog-error 2>/dev/null
+    exit 1
+fi
+
+# Read current prune (handles both string and integer JSON values).
+current_mib=$(python3 - "$settings" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+v = d.get("prune", "0")
+print(int(v))
+PY
+) || current_mib=0
+
+# Pull assumed sizes from the cached chainparams.cpp (written at install)
+# or fall back to safe rounded defaults.
+chainparams="$XDG_DATA_HOME/bot/chainparams.cpp"
+bc_gb="" cs_gb=""
+if [ -f "$chainparams" ]; then
+    bc_gb=$(grep --max-count=1 m_assumed_blockchain_size "$chainparams" | sed 's/[^0-9]*//g')
+    cs_gb=$(grep --max-count=1 m_assumed_chain_state_size "$chainparams" | sed 's/[^0-9]*//g')
+fi
+bc_gb=${bc_gb:-700}
+cs_gb=${cs_gb:-9}
+
+avail_gb=$(($(df --output=avail "$DATA_DIR" | tail -1) * 1024 / 10**9))
+
+new_mib=$(bot_pick_prune "$avail_gb" "$bc_gb" "$cs_gb" "$current_mib") || exit 0
+
+if [ "$new_mib" = "$current_mib" ]; then
+    zenity --info --title="No change" \
+        --text="Storage setting is already set to your selection. Nothing to do." \
+        "$ICON" --icon-name=bitcoin128 2>/dev/null
+    exit 0
+fi
+
+# Going pruned → archival deletes/can't restore historical blocks. Bitcoin
+# Core will refuse to disable pruning without -reindex; warn loudly.
+if [ "$new_mib" = "0" ] && [ "$current_mib" != "0" ]; then
+    if ! zenity --question \
+        --title="Switching to archival requires a full re-sync" \
+        --text="<b>Going from a pruned node to a full archival node means re-downloading the entire blockchain (~${bc_gb} GB).</b>\n\nBitcoin will refuse to start in archival mode without a reindex. After this change, BoT will set <tt>reindex=1</tt> in <tt>bitcoin.conf</tt> for you, and the next launch will rebuild the chain from scratch.\n\nThis can take many hours and significant bandwidth.\n\nProceed?" \
+        --width=560 "$ICON" --icon-name=dialog-warning 2>/dev/null; then
+        exit 0
+    fi
+    set_reindex=1
+else
+    set_reindex=0
+fi
+
+# Atomic write of settings.json. Python json keeps the file valid even if
+# other keys (proxy, onion, dbcache, server) live alongside prune.
+tmp="$(mktemp)"
+if ! python3 - "$settings" "$tmp" "$new_mib" <<'PY'
+import json, sys
+src, dst, new_mib = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(src) as f:
+    d = json.load(f)
+d["prune"] = str(int(new_mib))
+with open(dst, "w") as f:
+    json.dump(d, f, indent=4)
+    f.write("\n")
+PY
+then
+    rm -f "$tmp"
+    zenity --error --title="Write failed" \
+        --text="Could not update settings.json. No changes were made." \
+        "$ICON" --icon-name=dialog-error 2>/dev/null
+    exit 1
+fi
+mv "$tmp" "$settings"
+
+# Add reindex=1 to bitcoin.conf if we're going to archival, so the next
+# launch will rebuild. (Bitcoin Core removes reindex from its in-memory
+# settings after a successful run; safe to leave the line in the conf.)
+if (( set_reindex )); then
+    conf="$DOTFILES/.bitcoin/bitcoin.conf"
+    [ -f "$conf" ] || conf="$DATA_DIR/bitcoin.conf"
+    if [ -f "$conf" ] && ! grep -q '^reindex=' "$conf"; then
+        printf '\nreindex=1\n' >> "$conf"
+    fi
+fi
+
+# If Bitcoin is currently running, it must be stopped to apply.
+if pgrep -x bitcoin-qt >/dev/null 2>&1 || pgrep -x bitcoind >/dev/null 2>&1; then
+    zenity --info --title="Restart required" \
+        --text="Bitcoin is running. BoT will stop it now so the new storage setting takes effect on next launch." \
+        --width=480 "$ICON" --icon-name=bitcoin128 2>/dev/null
+    stop-btc 2>/dev/null || true
+fi
+
+if [ "$new_mib" = "0" ]; then
+    summary="Full archival (entire blockchain)"
+else
+    summary="Pruned to $((new_mib * 1024**2 / 10**9)) GB"
+fi
+
+zenity --info --title="Storage setting updated" \
+    --text="Prune is now: <b>$summary</b>.\n\nLaunch Bitcoin from your Apps menu to start with the new setting." \
+    --width=480 "$ICON" --icon-name=bitcoin128 2>/dev/null
+
+exit 0

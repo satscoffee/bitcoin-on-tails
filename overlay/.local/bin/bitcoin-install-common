@@ -477,6 +477,118 @@ bot_uninstall_bitcoin() {
 }
 
 
+###############################################################################
+# Storage / pruning UX. Used at first-install (no current value) and post-
+# install via bot-set-prune (current value loaded from settings.json).
+#
+# bot_pick_prune AVAIL_GB BLOCKCHAIN_GB CHAINSTATE_GB [CURRENT_PRUNE_MIB]
+#
+# Prints the chosen prune_MiB to stdout (0 = full archival). Returns
+# non-zero if the user cancels.
+###############################################################################
+bot_pick_prune() {
+    local avail_gb="$1" bc_gb="$2" cs_gb="$3" current_mib="${4:-}"
+    local space_after_cs recommended_gb rec_label rec_pre custom_pre archival_pre
+
+    # Recommended size: keep available space minus chainstate minus a 10 GB
+    # buffer, floor 2 GB. If the disk has room for archival, recommend that.
+    space_after_cs=$(( avail_gb - cs_gb - 10 ))
+    if (( space_after_cs > bc_gb )); then
+        recommended_gb=0   # archival fits
+        rec_label="Full archival — keep entire ~${bc_gb} GB blockchain (recommended: you have room)"
+    else
+        recommended_gb=$(( space_after_cs > 2 ? space_after_cs : 2 ))
+        rec_label="Pruned to ${recommended_gb} GB (recommended for your disk size)"
+    fi
+
+    # Pre-select whichever option matches the current setting (post-install).
+    rec_pre=TRUE; custom_pre=FALSE; archival_pre=FALSE
+    if [ -n "$current_mib" ]; then
+        local current_gb=$(( current_mib > 0 ? current_mib * 1024**2 / 10**9 : 0 ))
+        if [ "$current_mib" = "0" ]; then
+            rec_pre=FALSE; archival_pre=TRUE
+        elif [ "$current_gb" = "$recommended_gb" ] && (( recommended_gb > 0 )); then
+            : # already on rec_pre=TRUE
+        else
+            rec_pre=FALSE; custom_pre=TRUE
+        fi
+    fi
+
+    local current_line=""
+    if [ "$current_mib" = "0" ]; then
+        current_line="\n\n<i>Current setting: full archival.</i>"
+    elif [ -n "$current_mib" ] && (( current_mib > 0 )); then
+        current_line="\n\n<i>Current setting: pruned to $((current_mib * 1024**2 / 10**9)) GB.</i>"
+    fi
+
+    local explainer
+    explainer="<b>How much of the blockchain do you want on disk?</b>
+
+<b>Pruned</b> (smaller, e.g. 10–100 GB)
+  • Disk usage stays at your chosen size — the rest is discarded after validation.
+  • You still validate every block — this is a full sovereign node.
+  • Fine for using your own wallet privately.
+  • Cannot serve historical blocks to other nodes.
+  • Wallet backups older than your prune window need a re-sync to restore.
+
+<b>Full archival</b> (~${bc_gb} GB and growing)
+  • Stores the entire blockchain forever.
+  • Helps strengthen the network by serving blocks to peers.
+  • Can rescan any wallet from genesis without re-downloading.
+  • Requires regular disk-space maintenance as the chain grows.${current_line}"
+
+    local choice
+    choice=$(zenity --list --radiolist \
+        --title="Bitcoin storage settings" \
+        --text="$explainer" \
+        --column="Pick" --column="Mode" --column="Notes" \
+        "$rec_pre"     "recommended" "$rec_label" \
+        "$custom_pre"  "custom"      "Pruned to a custom size — you choose" \
+        "$archival_pre" "archival"   "Full archival node (~${bc_gb} GB and growing)" \
+        --width=760 --height=600 \
+        "$ICON" --icon-name=bitcoin128) || return 1
+
+    case "$choice" in
+        recommended)
+            if (( recommended_gb == 0 )); then
+                echo 0
+            else
+                echo $(( recommended_gb * 10**9 / 1024**2 ))
+            fi
+            ;;
+        custom)
+            local pick_gb default_gb
+            default_gb=$(( recommended_gb > 0 ? recommended_gb : 50 ))
+            [ -n "$current_mib" ] && (( current_mib > 0 )) && \
+                default_gb=$(( current_mib * 1024**2 / 10**9 ))
+            pick_gb=$(zenity --scale \
+                --title="Custom prune size" \
+                --text="Choose how many GB of recent blockchain to keep:" \
+                --min-value=2 --max-value="$bc_gb" \
+                --value="$default_gb" --step=1 \
+                "$ICON" --icon-name=bitcoin128) || return 1
+            (( pick_gb < 2 )) && pick_gb=2
+            echo $(( pick_gb * 10**9 / 1024**2 ))
+            ;;
+        archival)
+            if (( avail_gb < bc_gb + cs_gb + 10 )); then
+                if ! zenity --question \
+                    --title="Disk may be too small for archival" \
+                    --text="<b>Warning:</b> your USB has about ${avail_gb} GB free, but the full blockchain is ~${bc_gb} GB and grows over time. Bitcoin will likely run out of disk space.\n\nProceed with archival anyway?" \
+                    --width=520 \
+                    "$ICON" --icon-name=dialog-warning; then
+                    return 1
+                fi
+            fi
+            echo 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+
 # Early return for callers that just want env + helpers
 [ "$1" = "--funcs-only" ] && return 0
 
@@ -621,10 +733,26 @@ else
     ln --symbolic --force -b {"$HOME"/.bitcoin,$DATA_DIR}/debug.log # symlinks to tmpfs debug.log
     ln --symbolic --force -b $DOTFILES/.bitcoin/{README.md,bitcoin.conf} $DATA_DIR # symlinks to dotfiles/.bitcoin
     # Calculate space available for block file storage
-    space=$(($(df --output=avail $SOURCE | tail -1) * 1024 / 10 ** 9 - assumed_chain_state_size - 10))
-    prune_GB=$((space > 2 ? space : 2 ))
-    # Disable pruning if USB stick is large enough
-    prune_MiB=$((space > assumed_blockchain_size ? 0 : prune_GB * 10 ** 9 / 1024 ** 2))
+    avail_gb=$(($(df --output=avail $SOURCE | tail -1) * 1024 / 10 ** 9))
+    # Ask the user how much of the chain to keep. The picker presents a
+    # recommendation tailored to free disk space (archival if there's room,
+    # otherwise pruned-to-fit) plus custom and archival overrides. If the
+    # user cancels we fall back to the auto-calculated value (legacy
+    # behavior, never wedges the install).
+    if ! prune_MiB=$(bot_pick_prune "$avail_gb" "$assumed_blockchain_size" "$assumed_chain_state_size"); then
+        space=$(( avail_gb - assumed_chain_state_size - 10 ))
+        auto_prune_GB=$(( space > 2 ? space : 2 ))
+        prune_MiB=$(( space > assumed_blockchain_size ? 0 : auto_prune_GB * 10 ** 9 / 1024 ** 2 ))
+    fi
+    if (( prune_MiB > 0 )); then
+        prune_GB=$(( prune_MiB * 1024**2 / 10**9 ))
+    else
+        prune_GB=0
+    fi
+    # Cache chainparams.cpp into a stable location so bot-set-prune can read
+    # the same assumed sizes later without a fresh network probe.
+    install -D -m 0644 "$DOWNLOAD_DIR/chainparams.cpp" \
+        "$XDG_DATA_HOME/bot/chainparams.cpp" 2>/dev/null || true
     echo '{
         "dbcache": "450",
         "onion": "127.0.0.1:9050",

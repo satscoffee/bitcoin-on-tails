@@ -329,15 +329,17 @@ build_bitcoin_tab() {
     fi
     [ -z "$lv" ] && lv="(not checked yet)"
 
-    local cmd_check cmd_update cmd_uninstall cmd_changelog
+    local cmd_check cmd_update cmd_uninstall cmd_changelog cmd_storage
     if [ -n "$dist" ]; then
         cmd_check="$(mk_action "BoT — checking $label" "install-$dist --check")"
         cmd_update="$(mk_action "BoT — updating $label" "install-$dist --update")"
         cmd_uninstall="$(mk_action "BoT — uninstalling $label" "install-$dist --uninstall")"
+        cmd_storage="bot-set-prune >/dev/null 2>&1 &"
     else
         cmd_check="$(mk_action 'BoT — install Bitcoin' 'b')"
         cmd_update="$cmd_check"
         cmd_uninstall=":"
+        cmd_storage="zenity --info --title='Bitcoin not installed' --text='Install Bitcoin first, then you can change pruning here.' --width=420 $ICON_ARG &"
     fi
     if [ -n "$chg" ]; then
         cmd_changelog="xdg-open $(printf '%q' "$chg") >/dev/null 2>&1 &"
@@ -345,15 +347,22 @@ build_bitcoin_tab() {
         cmd_changelog="zenity --info --title='No release notes' --text='No changelog URL on file. Click Check for updates first.' --ellipsize $ICON_ARG &"
     fi
 
+    # Surface the active prune setting on the tab so the user can see what
+    # they have without opening the picker.
+    local prune_line
+    prune_line="$(get_prune_setting)"
+
     yad --plug="$key" --tabnum=2 \
         --form --columns=1 \
         --field="<b>${label}</b>:LBL" "" \
         --field="Installed version:RO" "${iv:-—}" \
         --field="Latest published:RO" "$lv" \
         --field="Status:RO" "$status_line" \
+        --field="Storage (prune):RO" "$prune_line" \
         --field="Check for updates:FBTN" "$cmd_check" \
         --field="What's changed:FBTN" "$cmd_changelog" \
         --field="Update now:FBTN" "$cmd_update" \
+        --field="Change storage…:FBTN" "$cmd_storage" \
         --field="Uninstall:FBTN" "$cmd_uninstall" &
 }
 
