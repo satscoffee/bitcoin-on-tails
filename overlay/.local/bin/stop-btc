@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
 #
 # stop-btc — graceful shutdown for bitcoind / bitcoin-qt with user feedback.
 #

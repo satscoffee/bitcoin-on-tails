@@ -58,9 +58,11 @@ The first run helps you turn on Persistent Storage and the right TPS features (D
 ### Steps
 
 1. **[Install Tails](https://tails.net/install/index.en.html)** to your USB stick.
-2. **[Boot Tails](https://tails.net/doc/first_steps/start/index.en.html).** At the Welcome Screen, skip Persistent Storage for now — BoT will help you set it up.
+2. **[Boot Tails](https://tails.net/doc/first_steps/start/index.en.html).** At the Welcome Screen:
+   - Click the **+** button and **set an Administration Password**. BoT needs `sudo` once during install (to add `libxcb-xinerama0` and `yad` — see below). Without an admin password, the installer cannot complete.
+   - Leave Persistent Storage off for now — BoT will help you set it up.
 3. **Connect to a network** and **[connect to Tor](https://tails.net/doc/anonymous_internet/tor/index.en.html)**.
-4. Open **Applications → Utilities → Terminal** and run:
+4. Open **Applications → System Tools → Console** and run:
 
    ```bash
    git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot && ~/bot/b
@@ -68,6 +70,15 @@ The first run helps you turn on Persistent Storage and the right TPS features (D
 
 5. When prompted, pick **Bitcoin Core** or **Bitcoin Knots**, then optionally install Sparrow Wallet.
 6. Let initial block download finish. Lock the screen with `❖+L` if you step away.
+
+### What the installer adds to your Tails system
+
+BoT installs two small packages on top of stock Tails. Both are short, audited, and on Debian's official repos:
+
+- **`libxcb-xinerama0`** — an X11 multi-monitor extension that the bundled Qt runtime inside `bitcoin-qt` links against. Without it, the Bitcoin Core GUI fails to launch at all. Tails dropped this library from its base image starting in the 6.x series; we re-add it.
+- **`yad`** ("Yet Another Dialog") — the GTK dialog toolkit used by `bot-menu`, the BoT control panel. zenity (which Tails ships) lacks tabs and form layouts, so we use yad for the multi-tab Status / Bitcoin / Sparrow / About panel.
+
+Both are installed via `sudo apt-get install` over Tor on first run. To make them survive reboots, BoT recommends turning on the **Additional Software** persistence feature and choosing **Install Every Time** when Tails asks. Without that, you'll have to reinstall both packages (and re-enter your admin password) every session.
 
 ### Updating
 
@@ -101,8 +112,11 @@ File issues at <https://github.com/satscoffee/bitcoin-on-tails/issues>.
 
 MIT — see [`LICENSE`](LICENSE).
 
+BoT is a fork of [Bails](https://github.com/BenWestgate/bails) by Ben Westgate. Original portions remain under his copyright; new and modified portions are © Satoshi Coffee Co.
+
 ```
-Copyright (c) 2026 Satoshi Coffee Co.
+Copyright (c) 2024 Ben Westgate (Bails — original work)
+Copyright (c) 2026 Satoshi Coffee Co. (Bitcoin on Tails — fork and ongoing work)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

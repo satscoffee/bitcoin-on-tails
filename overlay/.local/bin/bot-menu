@@ -1,20 +1,6 @@
 #!/bin/bash
-
-# Copyright (c) 2026 Satoshi Coffee Co.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
 
 ###############################################################################
 # bot-menu — Bitcoin on Tails control panel.
@@ -60,20 +46,21 @@ GPG_FINGERPRINT="2EE3 5C29 41D5 4C9E 9E2D  C908 33A3 9346 82DD 9E18"
 GPG_KEY_URL="https://sats.coffee/2EE35C2941D54C9E9E2DC90833A3934682DD9E18.asc"
 
 # If yad is missing, offer to install it now (bundled .deb if available, else apt).
+APT_TIMEOUT_SECS="${APT_TIMEOUT_SECS:-300}"
 if ! command -v yad >/dev/null 2>&1; then
     if ! command -v zenity >/dev/null 2>&1; then
         echo "bot-menu requires yad. Install it with: sudo apt-get install -y yad" >&2
         exit 1
     fi
     if ! zenity --question --title="bot-menu requires yad" \
-        --text="The Bitcoin on Tails control panel uses the <b>yad</b> GUI toolkit, which is not installed in Tails by default.\n\nInstall it now? You will be prompted for your <b>admin password</b>." \
+        --text="The Bitcoin on Tails control panel uses the <b>yad</b> GTK dialog toolkit (~600 KB) for its tabbed UI — zenity (which Tails ships) cannot do tabs or form layouts.\n\nInstall it now? You will be prompted for your <b>admin password</b>.\n\nIf you skip this, installs and updates from the terminal still work — only this graphical panel is unavailable." \
         --ok-label="Install" --cancel-label="Cancel" \
         --ellipsize "$ICON_ARG" 2>/dev/null; then
         exit 1
     fi
     if ! sudo -v 2>/dev/null; then
         zenity --error --title="Admin password required" \
-            --text="An Administration Password is required to install yad.\n\nReboot Tails, set an admin password at the Welcome Screen, then re-open Bitcoin on Tails." \
+            --text="An Administration Password is required to install yad.\n\nReboot Tails, click the <b>+</b> at the Welcome Screen, set an admin password, then re-open Bitcoin on Tails." \
             --ellipsize "$ICON_ARG" 2>/dev/null
         exit 1
     fi
@@ -83,16 +70,17 @@ if ! command -v yad >/dev/null 2>&1; then
     if [ -e "${yad_glob[0]}" ] && [ -s "$bundled_debs/SHA256SUMS" ] \
         && grep -qv '^[[:space:]]*\(#\|$\)' "$bundled_debs/SHA256SUMS"; then
         if (cd "$bundled_debs" && sha256sum -c SHA256SUMS) && \
-           sudo apt-get install -y "${yad_glob[@]}"; then
+           timeout "$APT_TIMEOUT_SECS" sudo apt-get install -y "${yad_glob[@]}"; then
             installed_ok=1
         fi
     fi
     if ! ((installed_ok)); then
-        sudo apt-get update -q && sudo apt-get install -y yad && installed_ok=1
+        timeout "$APT_TIMEOUT_SECS" sudo apt-get update -q && \
+            timeout "$APT_TIMEOUT_SECS" sudo apt-get install -y yad && installed_ok=1
     fi
     if ! ((installed_ok)); then
         zenity --error --title="yad install failed" \
-            --text="yad could not be installed. Check your network connection and try again." \
+            --text="yad could not be installed (apt timed out or returned an error after ${APT_TIMEOUT_SECS}s). This is usually a slow or stuck Tor circuit. Check your network connection and try again." \
             --ellipsize "$ICON_ARG" 2>/dev/null
         exit 1
     fi
@@ -348,22 +336,30 @@ build_bitcoin_tab() {
     fi
     [ -z "$lv" ] && lv="(not checked yet)"
 
-    local cmd_check cmd_update cmd_uninstall cmd_changelog cmd_storage cmd_network cmd_switch
-    if [ -n "$dist" ]; then
-        cmd_check="$(mk_action "BoT — checking $label" "install-$dist --check")"
-        cmd_update="$(mk_action "BoT — updating $label" "install-$dist --update")"
-        cmd_uninstall="$(mk_action "BoT — uninstalling $label" "install-$dist --uninstall")"
-        cmd_storage="bot-set-prune >/dev/null 2>&1 &"
-        cmd_network="bot-set-network >/dev/null 2>&1 &"
-        cmd_switch="$(mk_action 'BoT — change implementation' 'bot-switch-impl')"
-    else
-        cmd_check="$(mk_action 'BoT — install Bitcoin' 'b')"
-        cmd_update="$cmd_check"
-        cmd_uninstall=":"
-        cmd_storage="zenity --info --title='Bitcoin not installed' --text='Install Bitcoin first, then you can change pruning here.' --width=420 $ICON_ARG &"
-        cmd_network="zenity --info --title='Bitcoin not installed' --text='Install Bitcoin first, then you can change the network mode here.' --width=420 $ICON_ARG &"
-        cmd_switch="zenity --info --title='Bitcoin not installed' --text='Install Bitcoin first, then you can switch between Core and Knots here.' --width=420 $ICON_ARG &"
+    # If Bitcoin is not actually installed (no marker, no bitcoind binary),
+    # render a stripped-down tab that surfaces a single "Install Bitcoin"
+    # call-to-action instead of a wall of stub buttons (Check for updates,
+    # Update now, Uninstall) that all either no-op or re-launch `b`. This is
+    # what the half-install recovery state looks like — scripts copied but
+    # bitcoind never finished installing.
+    if [ -z "$dist" ]; then
+        local cmd_install
+        cmd_install="$(mk_action 'BoT — install Bitcoin' 'b')"
+        yad --plug="$key" --tabnum=2 \
+            --form --columns=1 \
+            --field="<b>Bitcoin not installed</b>:LBL" "" \
+            --field=":LBL" "Bitcoin Core or Bitcoin Knots is not yet installed on this system. Click below to start the install flow — you'll pick which implementation and version to install." \
+            --field="Install Bitcoin…:FBTN" "$cmd_install" &
+        return
     fi
+
+    local cmd_check cmd_update cmd_uninstall cmd_changelog cmd_storage cmd_network cmd_switch
+    cmd_check="$(mk_action "BoT — checking $label" "install-$dist --check")"
+    cmd_update="$(mk_action "BoT — updating $label" "install-$dist --update")"
+    cmd_uninstall="$(mk_action "BoT — uninstalling $label" "install-$dist --uninstall")"
+    cmd_storage="bot-set-prune >/dev/null 2>&1 &"
+    cmd_network="bot-set-network >/dev/null 2>&1 &"
+    cmd_switch="$(mk_action 'BoT — change implementation' 'bot-switch-impl')"
     if [ -n "$chg" ]; then
         cmd_changelog="xdg-open $(printf '%q' "$chg") >/dev/null 2>&1 &"
     else

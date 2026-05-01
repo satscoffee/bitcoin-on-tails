@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
 
 # Backup is simply a tails-backup command but it adds a file to the
 # autostart directory that welcomes the user to their backup. Asks if

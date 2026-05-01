@@ -1,49 +1,76 @@
 #!/bin/bash
-
-# Copyright (c) 2023 Ben Westgate
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-# THE SOFTWARE.
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
+# Portions derived from Bails (https://github.com/BenWestgate/bails) © Ben Westgate.
 
 ###############################################################################
-# Tails Persistent Storage Setup Tutorial
+# Tails Persistent Storage Setup Tutorial.
+#
+# Walks the user through unlocking / creating Persistent Storage, enabling the
+# TPS features BoT needs (Persistent Folder, GnuPG, Dotfiles), and installing
+# two upstream Debian packages on top of stock Tails:
+#
+#   • libxcb-xinerama0 — a small X11 multi-monitor extension that the Qt
+#     runtime bundled inside bitcoin-qt links against. Tails 6.x dropped this
+#     library from the base image; without it, the Bitcoin Core GUI fails to
+#     launch at all.
+#
+#   • yad — the GTK dialog toolkit used by the BoT control panel (bot-menu).
+#     Zenity (which Tails ships) cannot render tabs / form layouts / help.
+#
+# Both packages are installed via `sudo apt-get install` over Tor. Enabling
+# the Additional Software persistence feature lets Tails reinstall them on
+# every boot automatically — without it, you'll be re-prompted for an admin
+# password and have to wait through apt every session.
 ###############################################################################
 
 # For security reviewing this use: https://explainshell.com/ for commands that are unclear.
 export XDG_STATE_HOME="/live/persistence/TailsData_unlocked/dotfiles/.local/state"
 SET_UP="$XDG_STATE_HOME/tps_is_set_up"
 
+# Inherited from b. Defined here too so this script works standalone.
+type bot_raise_dialog >/dev/null 2>&1 || bot_raise_dialog() {
+    local title="$1"
+    [ -z "$title" ] && return 0
+    (
+        local i=0 wid=""
+        while [ "$i" -lt 12 ]; do
+            sleep 0.3
+            if command -v wmctrl >/dev/null 2>&1; then
+                wmctrl -F -a "$title" 2>/dev/null && break
+            fi
+            if command -v xdotool >/dev/null 2>&1; then
+                wid=$(xdotool search --name "$title" 2>/dev/null | tail -1)
+                if [ -n "$wid" ]; then
+                    xdotool windowactivate "$wid" 2>/dev/null && break
+                fi
+            fi
+            i=$((i+1))
+        done
+    ) >/dev/null 2>&1 &
+}
+
 # Check if user password is already set
 passwd_unset=$(passwd -S "$USER" | grep -c NP)
 
 # Display welcome message
-[ -f $SET_UP ] || zenity --title='Welcome to Bitcoin on Tails' --info \
-    --text="Thank you for choosing Bitcoin on Tails, a self-custodial Bitcoin wallet and full node.\n\nDuring this initial setup process, we will guide you through the necessary steps\nto ensure a smooth experience. Let's get started!" \
-    --no-wrap --ok-label='Continue' "$ICON" --icon-name=bot128
+if [ ! -f "$SET_UP" ]; then
+    bot_raise_dialog 'Welcome to Bitcoin on Tails'
+    zenity --title='Welcome to Bitcoin on Tails' --info \
+        --text="Thank you for choosing Bitcoin on Tails, a self-custodial Bitcoin wallet and full node.\n\nDuring this initial setup process, we will guide you through the necessary steps\nto ensure a smooth experience. Let's get started!" \
+        --no-wrap --ok-label='Continue' "$ICON" --icon-name=bot128
+fi
 
 # First-time setup: Persistent Storage not yet unlocked
 if ! /usr/local/lib/tpscli is-unlocked; then
     printf '\033]2;Setup the Persistent Storage\a'
     # Choose passphrase
+    bot_raise_dialog 'Choose a strong passphrase'
     zenity --warning --title='Choose a strong passphrase' --no-wrap "$ICON" \
         --text='It is important to select a strong passphrase to protect your Bitcoin data.\n
 We recommend using a suggested passphrase from the Persistent Storage dialog.' \
         --ok-label='I Will Use a Suggested Passphrase' --icon-name=tails-persistent-storage
+    bot_raise_dialog 'Write your passphrase down'
     zenity --warning --title='Write your passphrase down' "$ICON" \
         --text='It is impossible to recover your passphrase if you forget it!\n
 To help you remember, write it on paper, seal in an envelope, secure it for a few days in a place like a safe or your wallet, then destroy it once you know it well.\n
@@ -67,6 +94,7 @@ fi
 
 # Display memorization tips
 if ((passwd_unset)) && ! [ -f "$SET_UP" ]; then
+    bot_raise_dialog 'Tips for your new passphrase'
     zenity --info --title='Tips for your new passphrase' \
             --text="Keep your passphrase safe, DO NOT:
      • share it with anyone,
@@ -91,6 +119,7 @@ else
     grep --count 'python3 /usr/local/lib/tps-frontend' <<< "$(ps -ef)" - >/dev/null ||
         { tails-persistent-storage & notify-send --icon=tails-persistent-storage 'You must turn on needed features of the Persistent Storage.'; }
 
+    bot_raise_dialog 'Features of the Persistent Storage'
     zenity --info --title='Features of the Persistent Storage' \
         --text='In the Persistent Storage application below, scroll and click each toggle to turn on these necessary features:\n\n  • Persistent Folder\n  • Network Connections\n  • GnuPG\n  • Dotfiles\n\n(SSH Client is <b>not</b> required.)' \
         --icon-name=tails-persistent-storage "$ICON" --no-wrap &
@@ -125,11 +154,15 @@ pkill -f 'zenity --notification' &>/dev/null
 
 # Ensure Bitcoin Core's Qt runtime deps are installed.
 #
-# bitcoin-qt's bundled Qt links against libxcb-xinerama0, which recent Tails
-# releases do not ship by default. We strongly recommend enabling Tails'
-# Additional Software persistence feature so the library is automatically
-# reinstalled on every Tails boot — without it, you'll need to enter your
-# admin password and reinstall it every single session.
+# bitcoin-qt's bundled Qt links against libxcb-xinerama0 (an X11 multi-
+# monitor extension). Tails 6.x dropped this library from its base image, so
+# without it Bitcoin Core's GUI window fails to launch at all — the daemon
+# starts, but you'd never see the wallet UI.
+#
+# We strongly recommend enabling Tails' Additional Software persistence
+# feature so this tiny library reinstalls on every boot automatically;
+# without it you'd be prompted for your admin password and have to wait
+# through apt every single session.
 required_pkgs=(libxcb-xinerama0)
 missing_pkgs=()
 for pkg in "${required_pkgs[@]}"; do
@@ -138,13 +171,15 @@ done
 if ((${#missing_pkgs[@]})); then
     # Recommend enabling Additional Software persistence first, if it isn't on.
     if ! /usr/local/lib/tpscli is-active AdditionalSoftware 2>/dev/null; then
+        bot_raise_dialog 'Recommended: enable "Additional Software" persistence'
         zenity --info --title='Recommended: enable "Additional Software" persistence' \
-            --text="Bitcoin Core requires <tt>${missing_pkgs[*]}</tt>, which is not included in Tails by default.\n\n<b>Strongly recommended:</b> before continuing, open <b>Persistent Storage</b> and turn on the <b>Additional Software</b> feature.\n\nWith Additional Software enabled, Tails will ask whether to install this library <i>once</i> or <i>every time you start Tails</i>. Choose <b>Install Every Time</b> — then you won't need to enter your admin password or reinstall on future boots.\n\nWithout Additional Software, the library installs only for this session and must be reinstalled after every reboot (and you'll need an admin password each time).\n\nClick OK to continue with the installation." \
+            --text="Bitcoin Core's GUI (<tt>bitcoin-qt</tt>) needs <tt>${missing_pkgs[*]}</tt>, an X11 multi-monitor extension that Tails 6.x removed from its base image. Without it the wallet window won't open.\n\n<b>Strongly recommended:</b> before continuing, open <b>Persistent Storage</b> and turn on the <b>Additional Software</b> feature.\n\nWith Additional Software enabled, Tails will ask whether to install this library <i>once</i> or <i>every time you start Tails</i>. Choose <b>Install Every Time</b> — then it reinstalls automatically on every boot, no admin password, no waiting on apt.\n\nWithout Additional Software, the library installs only for this session and must be reinstalled after every reboot.\n\nClick OK to continue with the installation." \
             --ok-label='OK, Continue' "$ICON" --icon-name=tails-persistent-storage
     fi
 
+    bot_raise_dialog 'Install missing libraries for Bitcoin Core'
     zenity --info --title='Install missing libraries for Bitcoin Core' \
-        --text="About to install: <tt>${missing_pkgs[*]}</tt>\n\nYou will be prompted for your <b>admin password</b> in the terminal window.\n\nIf you did not set an Administration Password at the Tails Welcome Screen, click Cancel, reboot Tails, click the <b>+</b> menu at the Welcome Screen, set an admin password, then run Bitcoin on Tails again." \
+        --text="About to install: <tt>${missing_pkgs[*]}</tt> (X11 multi-monitor extension required by the Bitcoin Core GUI).\n\nYou will be prompted for your <b>admin password</b> in the terminal window.\n\nIf you did not set an Administration Password at the Tails Welcome Screen, click Cancel, reboot Tails, click the <b>+</b> menu at the Welcome Screen, set an admin password, then run Bitcoin on Tails again." \
         --ok-label='Install Now' "$ICON" --icon-name=system-software-install
     if sudo -n true 2>/dev/null || sudo -v; then
         sudo apt-get update -q
@@ -154,12 +189,14 @@ if ((${#missing_pkgs[@]})); then
         if sudo apt-get install -y "${missing_pkgs[@]}"; then
             :
         else
+            bot_raise_dialog 'Failed to install required libraries'
             zenity --error --title='Failed to install required libraries' \
                 --text="apt-get could not install: ${missing_pkgs[*]}\n\nCheck your network connection and try again." \
                 --ok-label='Exit' "$ICON" --icon-name=dialog-error
             exit 1
         fi
     else
+        bot_raise_dialog 'Admin password not set'
         zenity --error --title='Admin password not set' \
             --text='An Administration Password is required to install missing libraries.\n\nReboot Tails, click the <b>+</b> at the Welcome Screen, set an <b>Administration Password</b>, then run Bitcoin on Tails again.' \
             --ok-label='Exit' "$ICON" --icon-name=dialog-error
@@ -167,10 +204,23 @@ if ((${#missing_pkgs[@]})); then
     fi
 fi
 
-# Ensure yad is installed (used by bot-menu, the control panel). Prefer the
-# bundled, hash-verified .deb shipped in the release tarball so first-run
-# works even before the network is fully up. Fall back to apt-get over Tor
-# if the bundled deb is missing, fails verification, or fails to install.
+# Ensure yad is installed (used by bot-menu, the BoT control panel).
+#
+# Why yad and not zenity: zenity has no tabs, no FBTN form fields, and no
+# read-only forms — bot-menu's Status / Bitcoin / Sparrow / About panel needs
+# all three. yad is a small (~600 KB) GTK dialog toolkit on Debian's official
+# repos. Without it, the control panel cannot run, but installs and updates
+# from the command line still work.
+#
+# Strategy: prefer the bundled, hash-verified .deb shipped in the release
+# tarball so first-run works even on a slow Tor circuit. Fall back to
+# apt-get over Tor if the bundled deb is missing, fails verification, or
+# fails to install.
+#
+# Stall hardening: every apt-get call below is wrapped in `timeout` so a
+# hung Tor circuit (which has bitten users on the third validation step
+# during dpkg post-install scripts) cannot wedge the installer indefinitely.
+APT_TIMEOUT_SECS="${APT_TIMEOUT_SECS:-300}"
 if ! command -v yad >/dev/null 2>&1; then
     bundled_debs="$DOTFILES/.local/share/bot/debs"
     yad_glob=("$bundled_debs"/yad_*.deb)
@@ -182,12 +232,13 @@ if ! command -v yad >/dev/null 2>&1; then
 
     yad_installed=0
     if ((bundled_yad_ok)); then
+        bot_raise_dialog 'Install yad (bundled)'
         zenity --info --title='Install yad (bundled)' \
-            --text="The Bitcoin on Tails control panel uses the <b>yad</b> GUI toolkit, which is not included in Tails by default.\n\nA verified copy is bundled with this release. You will be prompted for your <b>admin password</b> to install it." \
+            --text="The Bitcoin on Tails control panel (<tt>bot-menu</tt>) uses the <b>yad</b> GTK dialog toolkit for its tabbed UI — zenity (which Tails ships) cannot do tabs or form layouts.\n\nA verified copy is bundled with this release (~600 KB). You will be prompted for your <b>admin password</b> to install it.\n\nIf you skip this, installs and updates from the terminal still work — only the graphical control panel is unavailable." \
             --ok-label='Install Now' "$ICON" --icon-name=system-software-install
         if sudo -n true 2>/dev/null || sudo -v; then
             if (cd "$bundled_debs" && sha256sum -c SHA256SUMS) && \
-               sudo apt-get install -y "${yad_glob[@]}"; then
+               timeout "$APT_TIMEOUT_SECS" sudo apt-get install -y "${yad_glob[@]}"; then
                 yad_installed=1
             fi
         fi
@@ -196,19 +247,25 @@ if ! command -v yad >/dev/null 2>&1; then
     if ! ((yad_installed)); then
         # Fall back to apt over Tor; reuses the same flow as libxcb-xinerama0.
         if ! /usr/local/lib/tpscli is-active AdditionalSoftware 2>/dev/null; then
+            bot_raise_dialog 'Recommended: enable "Additional Software" persistence'
             zenity --info --title='Recommended: enable "Additional Software" persistence' \
-                --text="The Bitcoin on Tails control panel requires <tt>yad</tt>, which will be installed from Debian over Tor.\n\n<b>Strongly recommended:</b> before continuing, open <b>Persistent Storage</b> and turn on the <b>Additional Software</b> feature, then choose <b>Install Every Time</b> when prompted — without it, yad will need to be reinstalled after every reboot." \
+                --text="The Bitcoin on Tails control panel needs <tt>yad</tt> (a GTK dialog toolkit, ~600 KB), which will be installed from Debian over Tor.\n\n<b>Strongly recommended:</b> before continuing, open <b>Persistent Storage</b> and turn on the <b>Additional Software</b> feature, then choose <b>Install Every Time</b> when prompted — without it, yad will need to be reinstalled after every reboot." \
                 --ok-label='OK, Continue' "$ICON" --icon-name=tails-persistent-storage
         fi
+        bot_raise_dialog 'Install yad'
         zenity --info --title='Install yad' \
-            --text="About to install <tt>yad</tt> over Tor.\n\nYou will be prompted for your <b>admin password</b>." \
+            --text="About to install <tt>yad</tt> (GTK dialog toolkit, ~600 KB) over Tor.\n\nYou will be prompted for your <b>admin password</b>.\n\nIf you skip this, the graphical control panel won't open, but installs and updates still work from the command line." \
             --ok-label='Install Now' "$ICON" --icon-name=system-software-install
         if sudo -n true 2>/dev/null || sudo -v; then
-            sudo apt-get update -q
-            sudo apt-get install -y yad || zenity --warning --title='yad install failed' \
-                --text='yad could not be installed. The control panel <tt>bot-menu</tt> will not be available until you re-run the installer with a working network connection.' \
-                --ellipsize "$ICON" --icon-name=dialog-warning
+            timeout "$APT_TIMEOUT_SECS" sudo apt-get update -q
+            if ! timeout "$APT_TIMEOUT_SECS" sudo apt-get install -y yad; then
+                bot_raise_dialog 'yad install failed'
+                zenity --warning --title='yad install failed' \
+                    --text="yad could not be installed (apt timed out or returned an error after ${APT_TIMEOUT_SECS}s).\n\nThis is usually a slow or stuck Tor circuit. The graphical control panel won't be available until you re-run the installer with a working network connection — but installs / updates from the command line still work." \
+                    --ellipsize "$ICON" --icon-name=dialog-warning
+            fi
         else
+            bot_raise_dialog 'yad install skipped'
             zenity --warning --title='yad install skipped' \
                 --text='Without an admin password, yad cannot be installed. The control panel <tt>bot-menu</tt> will not be available until yad is installed.' \
                 --ellipsize "$ICON" --icon-name=dialog-warning

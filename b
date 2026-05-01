@@ -1,35 +1,50 @@
 #!/bin/bash
-
-# Copyright (c) 2023 Ben Westgate
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-# #
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-# THE SOFTWARE.
+# SPDX-License-Identifier: MIT
+# Bitcoin on Tails — top-level installer / updater entry point. See LICENSE.
 
 ###############################################################################
-# Sets environment variable, asks which Bitcoin implementation to install, and launches install-core or install-knots
+# Sets environment variables, asks which Bitcoin implementation to install,
+# and launches install-core or install-knots.
 ###############################################################################
 
-export VERSION='v0.7.3-alpha'
+export VERSION='v0.7.4-alpha'
 export WAYLAND_DISPLAY="" # Needed for zenity dialogs to have window icon
 export ICON="--window-icon=$HOME/.local/share/icons/bot128.png"
 export DOTFILES='/live/persistence/TailsData_unlocked/dotfiles'
 readonly SECURITY_IN_A_BOX_URL="https://securityinabox.org/en/"
 BOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+###############################################################################
+# bot_raise_dialog TITLE
+#
+# Background helper that nudges a dialog with the given exact title to the
+# foreground. Zenity inherits no "always-on-top" hint from GTK, so on Tails
+# it sometimes opens behind the Persistent Storage app, the running terminal,
+# or whatever else has focus. We poll for the window using wmctrl / xdotool
+# (whichever is available — Tails ships xdotool by default) and activate it.
+# Silently does nothing if neither tool is available.
+###############################################################################
+bot_raise_dialog() {
+    local title="$1"
+    [ -z "$title" ] && return 0
+    (
+        local i=0 wid=""
+        while [ "$i" -lt 12 ]; do
+            sleep 0.3
+            if command -v wmctrl >/dev/null 2>&1; then
+                wmctrl -F -a "$title" 2>/dev/null && break
+            fi
+            if command -v xdotool >/dev/null 2>&1; then
+                wid=$(xdotool search --name "$title" 2>/dev/null | tail -1)
+                if [ -n "$wid" ]; then
+                    xdotool windowactivate "$wid" 2>/dev/null && break
+                fi
+            fi
+            i=$((i+1))
+        done
+    ) >/dev/null 2>&1 &
+}
+export -f bot_raise_dialog
 
 if [ "$1" == "--version" ]; then
   echo "Bitcoin on Tails version $VERSION"
@@ -154,16 +169,35 @@ else
   fi
 
   # Detect "BoT exists in Persistent Storage but I'm running b from somewhere
-  # else" (e.g., a developer working tree at ~/bitcoin-on-tails). The signal
-  # is a real install at $INSTALLED_BOT_DIR or a populated dist marker. When
+  # else" (e.g., a developer working tree at ~/bot). The signal is a real
+  # install at $INSTALLED_BOT_DIR plus evidence that Bitcoin actually finished
+  # installing — the dist marker, OR an actual bitcoind binary on disk. When
   # this fires we don't want to silently rerun the full first-install flow —
   # we offer a refresh path that just syncs the working tree's scripts into
   # Persistent Storage, no Bitcoin reinstall.
+  #
+  # Half-install detection: if BoT scripts are present in $INSTALLED_BOT_DIR
+  # but there is no dist marker AND no bitcoind binary (e.g. the user Ctrl+C'd
+  # mid-install), we deliberately do NOT set bot_already_setup. Instead we
+  # fall through to the first-install branch below, which idempotently
+  # refreshes the overlay and runs the install flow. This is what the user
+  # almost certainly wanted — the previous run never finished.
   STATE_HOME_PROBE="${XDG_STATE_HOME:-$DOTFILES/.local/state}"
   bot_already_setup=0
   if ! ((already_installed)); then
-      if [ -x "$INSTALLED_BOT_DIR/b" ] || [ -s "$STATE_HOME_PROBE/bot/dist" ]; then
+      if [ -s "$STATE_HOME_PROBE/bot/dist" ]; then
           bot_already_setup=1
+      elif [ -x "$INSTALLED_BOT_DIR/b" ]; then
+          # Scripts are present, but did Bitcoin actually finish installing?
+          if command -v bitcoind >/dev/null 2>&1 \
+              || [ -x "$DOTFILES/.local/bin/bitcoind" ] \
+              || [ -x "$DOTFILES/.local/bin/bitcoin-qt" ]; then
+              bot_already_setup=1
+          else
+              # Half-installed: scripts copied, Bitcoin missing. Tell the user
+              # what we're doing rather than silently dropping into the menu.
+              echo "Bitcoin on Tails: detected a previous install that didn't finish (scripts present, bitcoind missing). Resuming install flow..." >&2
+          fi
       fi
   fi
 
@@ -175,6 +209,7 @@ else
   elif ((bot_already_setup)); then
     # Working-tree run on a stick that already has BoT installed. Don't force
     # a full reinstall — let the user pick what they actually wanted.
+    bot_raise_dialog "Bitcoin on Tails is already installed"
     dev_choice=$(zenity --list --radiolist \
         --title="Bitcoin on Tails is already installed" \
         --text="<b>BoT is already set up in your Persistent Storage.</b>\n\nYou ran <tt>b</tt> from a working tree at:\n<tt>$BOT_DIR</tt>\n\nWhat would you like to do?" \
@@ -255,6 +290,7 @@ else
   fi
   if [ -z "$1" ]; then # Install/Update if ran without a parameter
     # Ask which Bitcoin implementation to install. No default — user must choose.
+    bot_raise_dialog "Choose a Bitcoin implementation"
     bitcoin_impl=$(zenity --list --radiolist \
         --title="Choose a Bitcoin implementation" \
         --text="<b>No default selected — please pick one.</b>\n\nBoth are full-node implementations of the Bitcoin protocol." \
