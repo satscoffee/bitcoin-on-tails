@@ -446,15 +446,88 @@ build_sparrow_tab() {
     fi
 }
 
+###############################################################################
+# UTXOracle tab — surfaces the bundled `utxoracle` wrapper.
+#
+# License compliance: per the UTXOracle License v1.0, when displaying the
+# script's outputs we must use the canonical names "UTXOracle Consensus Price"
+# (24-hour daily average) and "UTXOracle Block Window Price" (last 144
+# confirmed blocks). They appear verbatim in this tab.
+###############################################################################
+build_utxoracle_tab() {
+    local key=$1
+    local utxo_kv="$XDG_STATE_HOME/bot/utxoracle-last.kv"
+    local utxo_py="$XDG_DATA_HOME/bot/utxoracle/UTXOracle.py"
+
+    # If Bitcoin isn't installed yet, the wrapper has nothing to talk to.
+    # Render an empty-state message instead of a wall of dead buttons.
+    local dist; dist="$(active_dist)"
+    if [ -z "$dist" ]; then
+        yad --plug="$key" --tabnum=4 \
+            --form --columns=1 \
+            --field="<b>UTXOracle Price</b>:LBL" "" \
+            --field=":LBL" "UTXOracle reads transaction data from your local Bitcoin node to derive a price — it cannot run until Bitcoin Core or Bitcoin Knots is installed.\n\nInstall Bitcoin from the Bitcoin tab first." &
+        return
+    fi
+    if [ ! -s "$utxo_py" ]; then
+        yad --plug="$key" --tabnum=4 \
+            --form --columns=1 \
+            --field="<b>UTXOracle bundle missing</b>:LBL" "" \
+            --field=":LBL" "Expected $utxo_py.\nRe-run \`b\` to repair the BoT install." &
+        return
+    fi
+
+    # Last-run summary from the wrapper's KV sidecar.
+    local last_iso last_html last_line mode mode_label canonical
+    last_iso=$(kv_get  "$utxo_kv" last_run_iso    || true)
+    last_html=$(kv_get "$utxo_kv" last_html       || true)
+    last_line=$(kv_get "$utxo_kv" last_price_line || true)
+    mode=$(kv_get      "$utxo_kv" mode            || true)
+    case "$mode" in
+        block_window) mode_label="Last run: UTXOracle Block Window Price (most recent 144 confirmed blocks)" ;;
+        consensus|*)  mode_label="Last run: UTXOracle Consensus Price (24-hour daily average)" ;;
+    esac
+    [ -z "$last_iso" ]  && last_iso="—"
+    [ -z "$last_line" ] && last_line="(no run on file yet)"
+
+    # Action commands. mk_action wraps in x-terminal-emulator + bash -lc so
+    # the user sees UTXOracle's progress output.
+    local cmd_consensus cmd_block cmd_show
+    cmd_consensus="$(mk_action 'BoT — UTXOracle Consensus Price' 'utxoracle')"
+    cmd_block="$(mk_action 'BoT — UTXOracle Block Window Price' 'utxoracle -rb')"
+    if [ -n "$last_html" ] && [ -s "$last_html" ]; then
+        # xdg-open routes file:// URLs through Tor Browser on Tails.
+        cmd_show="xdg-open $(printf '%q' "$last_html") >/dev/null 2>&1 &"
+    else
+        cmd_show="zenity --info --title='No chart yet' \
+            --text='Run UTXOracle Consensus Price or UTXOracle Block Window Price first to generate a chart.' \
+            --ellipsize $ICON_ARG &"
+    fi
+
+    # Static descriptive blurb. Canonical names retained per UTXOracle License v1.0.
+    canonical="<b>UTXOracle</b> derives a Bitcoin price from <b>your own node's data only</b> — no third-party APIs, no IP leaks. Bundled snapshot from <tt>utxo.live</tt>; license preserved at <tt>$XDG_DATA_HOME/bot/utxoracle/LICENSE.txt</tt>."
+
+    yad --plug="$key" --tabnum=4 \
+        --form --columns=1 \
+        --field="<b>UTXOracle Price (local node)</b>:LBL" "" \
+        --field="Last run:RO"      "$last_iso" \
+        --field="Last result:RO"   "$last_line" \
+        --field="Mode:RO"          "$mode_label" \
+        --field="Show last chart:FBTN"                                "$cmd_show" \
+        --field="Compute UTXOracle Consensus Price (yesterday):FBTN"  "$cmd_consensus" \
+        --field="Compute UTXOracle Block Window Price (last 144):FBTN" "$cmd_block" \
+        --field=":LBL" "$canonical" &
+}
+
 build_about_tab() {
     local key=$1
     local body
     body="<b>Bitcoin on Tails</b> $(get_bot_version)
 
-A Bitcoin full-node installer for Tails OS. Installs Bitcoin Core or Bitcoin Knots, plus Sparrow Wallet as an optional add-on talking to your local node over RPC.
+A Bitcoin full-node installer for Tails OS. Installs Bitcoin Core or Bitcoin Knots, plus Sparrow Wallet as an optional add-on talking to your local node over RPC. UTXOracle is bundled for on-chain price discovery from your own node.
 
 <b>Source:</b> <a href='https://github.com/satscoffee/bitcoin-on-tails'>github.com/satscoffee/bitcoin-on-tails</a>
-<b>License:</b> MIT
+<b>License:</b> MIT (BoT itself). UTXOracle is bundled under its own license — see <tt>$XDG_DATA_HOME/bot/utxoracle/LICENSE.txt</tt>.
 
 <b>Verifying releases</b>
 
@@ -466,7 +539,7 @@ Public key: <a href='$GPG_KEY_URL'>$GPG_KEY_URL</a>
 
 Cross-check the fingerprint against an independent source before importing."
 
-    yad --plug="$key" --tabnum=4 \
+    yad --plug="$key" --tabnum=5 \
         --form --columns=1 \
         --text="$body" \
         --text-align=left &
@@ -481,12 +554,15 @@ main() {
     build_status_tab "$key"
     build_bitcoin_tab "$key"
     build_sparrow_tab "$key"
+    build_utxoracle_tab "$key"
     build_about_tab "$key"
 
+    # Tab label "UTXOracle Price" — if it gets cut off in your install, swap to
+    # "UTXOracle\nPrice" (yad accepts a literal newline in --tab labels).
     yad --notebook --key="$key" \
         --title="Bitcoin on Tails" \
-        --tab="Status" --tab="Bitcoin" --tab="Sparrow" --tab="About" \
-        --width=560 --height=520 \
+        --tab="Status" --tab="Bitcoin" --tab="Sparrow" --tab="UTXOracle Price" --tab="About" \
+        --width=620 --height=540 \
         --button="gtk-close:0" \
         --image="$ICON_FILE" --image-on-top \
         "$ICON_ARG"

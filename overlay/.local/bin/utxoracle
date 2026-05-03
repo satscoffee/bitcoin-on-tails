@@ -1,0 +1,100 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
+#
+# utxoracle — wrapper around the bundled UTXOracle.py snapshot.
+#
+# Why a wrapper:
+#   - UTXOracle.py needs -p pointing at the Bitcoin datadir; BoT uses a
+#     non-default datadir under Persistent Storage. Hardcoding it here means
+#     users don't have to remember the flag.
+#   - UTXOracle.py writes its HTML output to the current working directory.
+#     We cd into a known location ($XDG_DATA_HOME/bot/utxoracle/output) so
+#     bot-menu can find the latest report.
+#   - We capture stdout to a small KV file ($XDG_STATE_HOME/bot/utxoracle-last.kv)
+#     so the bot-menu Price tab can show the most recent price + date without
+#     re-running the script.
+#   - We verify the bundled UTXOracle.py against SHA256SUMS on every run.
+#     The .py is shipped inside the BoT release tarball and signed with the
+#     BoT git tag; this check catches local tampering.
+#
+# Usage: same as UTXOracle.py — `utxoracle`, `utxoracle -d 2026/04/15`,
+# `utxoracle -rb`, `utxoracle -h`.
+
+set -u
+
+DATA_DIR="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bitcoin}"
+DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
+XDG_DATA_HOME="${XDG_DATA_HOME:-$DOTFILES/.local/share}"
+XDG_STATE_HOME="${XDG_STATE_HOME:-$DOTFILES/.local/state}"
+
+UTXO_DIR="$XDG_DATA_HOME/bot/utxoracle"
+UTXO_PY="$UTXO_DIR/UTXOracle.py"
+UTXO_SUMS="$UTXO_DIR/SHA256SUMS"
+OUTPUT_DIR="$UTXO_DIR/output"
+STATE_DIR="$XDG_STATE_HOME/bot"
+LAST_KV="$STATE_DIR/utxoracle-last.kv"
+
+# Sanity: bundle present?
+if [ ! -s "$UTXO_PY" ] || [ ! -s "$UTXO_SUMS" ]; then
+    echo "utxoracle: bundled snapshot missing. Expected:" >&2
+    echo "  $UTXO_PY" >&2
+    echo "  $UTXO_SUMS" >&2
+    echo "Re-run \`b\` to repair the BoT install." >&2
+    exit 1
+fi
+
+# Verify bundled snapshot. Catches local tampering; the upstream-trust story
+# is "you trust the BoT release signature you cloned/pulled".
+if ! ( cd "$UTXO_DIR" && sha256sum -c SHA256SUMS --quiet ) >/dev/null 2>&1; then
+    echo "utxoracle: SHA256 verification of bundled UTXOracle.py FAILED." >&2
+    echo "The file may have been tampered with. Refusing to run." >&2
+    echo "Re-clone or \`b --update\` to restore the verified bundle." >&2
+    exit 2
+fi
+
+# Need a running bitcoind for RPC. Check before running so the user gets a
+# clean error instead of UTXOracle's RPC traceback.
+if ! command -v bitcoin-cli >/dev/null 2>&1; then
+    echo "utxoracle: bitcoin-cli not found. Install Bitcoin first via \`b\`." >&2
+    exit 3
+fi
+
+mkdir -p "$OUTPUT_DIR" "$STATE_DIR"
+cd "$OUTPUT_DIR" || exit 4
+
+# Capture stdout to a temp file so we can parse the price line. tee streams
+# it to the user's terminal in real time.
+RUN_LOG="$(mktemp)"
+trap 'rm -f "$RUN_LOG"' EXIT
+
+python3 "$UTXO_PY" -p "$DATA_DIR" "$@" 2>&1 | tee "$RUN_LOG"
+PYRC="${PIPESTATUS[0]}"
+if [ "$PYRC" -ne 0 ]; then
+    exit "$PYRC"
+fi
+
+# Parse "<Mon DD, YYYY> price: $<num>" line UTXOracle prints in date mode.
+# In block mode there's no such summary; we record the file path only.
+PRICE_LINE=$(grep -E 'price:[[:space:]]*\$' "$RUN_LOG" | tail -1 | sed 's/^[[:space:]]*//')
+LATEST_HTML=$(ls -t UTXOracle_*.html 2>/dev/null | head -1)
+[ -n "$LATEST_HTML" ] && LATEST_HTML="$OUTPUT_DIR/$LATEST_HTML"
+
+# Determine which mode was used (date vs block window) by inspecting argv.
+MODE="consensus"   # default = date mode = UTXOracle Consensus Price
+for a in "$@"; do
+    [ "$a" = "-rb" ] && MODE="block_window"
+done
+
+# Atomic KV write so bot-menu never sees a half-written file.
+TMP_KV="$(mktemp "${LAST_KV}.XXXXXX")"
+{
+    printf 'mode=%s\n'             "$MODE"
+    printf 'last_run_unix=%s\n'    "$(date +%s)"
+    printf 'last_run_iso=%s\n'     "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'last_html=%s\n'        "${LATEST_HTML:-}"
+    printf 'last_price_line=%s\n'  "${PRICE_LINE:-}"
+} > "$TMP_KV"
+mv -f "$TMP_KV" "$LAST_KV"
+
+exit 0

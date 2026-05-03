@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=UTXOracle Price
+GenericName=On-chain Bitcoin price (local node)
+Comment=Compute yesterday's UTXOracle Consensus Price from your own Bitcoin node — no third-party data sources, no IP leaks.
+Exec=x-terminal-emulator -T "UTXOracle" -e bash -lc "utxoracle; echo; read -rsn 1 -p 'Press any key to close. ' _; echo"
+Icon=bot128
+Terminal=false
+Categories=Office;Finance;Network;
+Keywords=bitcoin;price;oracle;utxo;node;
+StartupNotify=true

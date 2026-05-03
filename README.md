@@ -14,6 +14,7 @@ BoT does not generate seeds, design backup schemes, or pick wallet policies for 
 
 - **Bitcoin Core** or **Bitcoin Knots** — pick one at install time. Both are full-node implementations; Knots is Luke Dashjr's fork with extra relay policy options.
 - **Sparrow Wallet** (optional) — desktop Bitcoin wallet that talks to your local Core/Knots node over RPC, so wallet queries never leak to a third-party Electrum server.
+- **UTXOracle** (bundled) — Steven Roose's single-file Python script that derives a Bitcoin price from your own node's transaction data. No third-party APIs, no IP leaks. Available from the Apps menu and from the **UTXOracle Price** tab in `bot-menu`. The bundled snapshot has the upstream auto-loading YouTube iframe replaced with a plain link (Tor circuit safety) but is otherwise unmodified; the UTXOracle License is preserved alongside the script.
 
 Everything runs inside Tails, so all network traffic goes through Tor by default.
 
@@ -40,8 +41,9 @@ The first run helps you turn on Persistent Storage and the right TPS features (D
 ## Tools shipped in `PATH`
 
 - `b` — top-level installer / updater. Run with no arguments to install or update; pass `--version` to print the BoT version.
-- `bot-menu` — yad-based control panel. Status, About, and (in progress) Update / Uninstall tabs.
+- `bot-menu` — yad-based control panel. Status, Bitcoin, Sparrow, UTXOracle Price, and About tabs.
 - `install-core`, `install-knots`, `install-sparrow` — standalone installers for each component.
+- `utxoracle` — wrapper around the bundled UTXOracle snapshot. `utxoracle` for yesterday's UTXOracle Consensus Price, `utxoracle -rb` for the UTXOracle Block Window Price (last 144 confirmed blocks).
 - `bot-backup` — wraps `tails-installer --backup` to clone your stick to a second USB.
 - `ibd-progress` — tiny progress reporter for initial block download.
 - `stop-btc` — graceful `bitcoind` shutdown.

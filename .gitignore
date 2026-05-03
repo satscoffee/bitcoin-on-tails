@@ -1,4 +1,6 @@
 
 *.pyc
+__pycache__/
 .DS_Store
 PHASE_*.md
+overlay/.local/share/bot/utxoracle/output/
