@@ -121,7 +121,7 @@ else
 
     bot_raise_dialog 'Features of the Persistent Storage'
     zenity --info --title='Features of the Persistent Storage' \
-        --text='In the Persistent Storage application below, scroll and click each toggle to turn on these necessary features:\n\n  • Persistent Folder\n  • Network Connections\n  • GnuPG\n  • Dotfiles\n\n(SSH Client is <b>not</b> required.)' \
+        --text='In the Persistent Storage application below, scroll and click each toggle to turn on these necessary features:\n\n  • Persistent Folder\n  • Network Connections\n  • GnuPG\n  • <b>Dotfiles</b> — required so BoT scripts (b, install-core, etc.) stay reachable from a fresh Console window across reboots\n\n(SSH Client is <b>not</b> required.)' \
         --icon-name=tails-persistent-storage "$ICON" --no-wrap &
     sleep 4
 fi

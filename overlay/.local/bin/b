@@ -1,0 +1,23 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
+#
+# `b` PATH wrapper. The real installer lives inside the cloned BoT repo at
+# $DOTFILES/.local/share/bot/b (so `git pull` updates work in place). This
+# wrapper exists so plain `b ...` from any shell on PATH dispatches into the
+# real file. Without it, `which b` returns empty after a normal install,
+# because the BoT git clone never lands anything named `b` under
+# ~/.local/bin/.
+
+DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
+REAL_B="$DOTFILES/.local/share/bot/b"
+
+if [ ! -x "$REAL_B" ]; then
+    echo "b: cannot locate the BoT installer at $REAL_B" >&2
+    echo "    The BoT clone in your Persistent Storage may have been removed or never installed." >&2
+    echo "    Re-run from a fresh clone:" >&2
+    echo "       git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot && ~/bot/b" >&2
+    exit 1
+fi
+
+exec "$REAL_B" "$@"
