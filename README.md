@@ -15,6 +15,7 @@ BoT does not generate seeds, design backup schemes, or pick wallet policies for 
 - **Bitcoin Core** or **Bitcoin Knots** — pick one at install time. Both are full-node implementations; Knots is Luke Dashjr's fork with extra relay policy options.
 - **Sparrow Wallet** (optional) — desktop Bitcoin wallet that talks to your local Core/Knots node over RPC, so wallet queries never leak to a third-party Electrum server.
 - **UTXOracle** (bundled) — Steven Roose's single-file Python script that derives a Bitcoin price from your own node's transaction data. No third-party APIs, no IP leaks. Available from the Apps menu and from the **UTXOracle Price** tab in `bot-menu`. The bundled snapshot has the upstream auto-loading YouTube iframe replaced with a plain link (Tor circuit safety) but is otherwise unmodified; the UTXOracle License is preserved alongside the script.
+- **`utxoracle-serve`** — local HTTP price oracle backed by UTXOracle, bound to `127.0.0.1` only. Recomputes the UTXOracle Block Window Price on each new confirmed block and exposes CoinGecko-shape, Coinbase-shape, and native endpoints — including historical lookups via `/price?date=YYYY-MM-DD`. Foundation for future Sparrow Wallet integration; usable today by any tool that takes a custom price-source URL or by the bundled `btcprice` CLI.
 
 Everything runs inside Tails, so all network traffic goes through Tor by default.
 
@@ -43,10 +44,34 @@ The first run helps you turn on Persistent Storage and the right TPS features (D
 - `b` — top-level installer / updater. Run with no arguments to install or update; pass `--version` to print the BoT version.
 - `bot-menu` — yad-based control panel. Status, Bitcoin, Sparrow, UTXOracle Price, and About tabs.
 - `install-core`, `install-knots`, `install-sparrow` — standalone installers for each component.
-- `utxoracle` — wrapper around the bundled UTXOracle snapshot. `utxoracle` for yesterday's UTXOracle Consensus Price, `utxoracle -rb` for the UTXOracle Block Window Price (last 144 confirmed blocks).
+- `utxoracle` — one-shot wrapper around the bundled UTXOracle snapshot. `utxoracle` for yesterday's UTXOracle Consensus Price, `utxoracle -rb` for the UTXOracle Block Window Price (last 144 confirmed blocks). Generates a chart and opens it in Tor Browser.
+- `utxoracle-serve` — start/stop/status control for the local HTTP price oracle (loopback-only, refreshes per block). `utxoracle-serve start | stop | status | restart | url | open`.
+- `btcprice` — terminal one-liner that hits `utxoracle-serve` and prints the latest price. Pass a date (`btcprice 2024-04-15`) for the UTXOracle Consensus Price for that day.
+- `bot-check-update` / `bot-update-now` — surface BoT updates from origin without auto-installing, plus an interactive update wrapper that handles the `rm -rf ~/bot && git clone` dance for you.
 - `bot-backup` — wraps `tails-installer --backup` to clone your stick to a second USB.
 - `ibd-progress` — tiny progress reporter for initial block download.
 - `stop-btc` — graceful `bitcoind` shutdown.
+
+## Local price oracle (`utxoracle-serve`)
+
+`utxoracle-serve` is a small HTTP daemon that exposes UTXOracle prices to local programs. It binds to `127.0.0.1` only, refuses non-loopback connections, and refreshes the **UTXOracle Block Window Price** once per new confirmed block — never sub-block, never live, never to a public-facing port. Same trust posture as a `bitcoin-cli` call.
+
+Endpoints (all GET):
+
+```
+/api/v3/simple/price?ids=bitcoin&vs_currencies=usd   CoinGecko-shape JSON
+/v2/prices/BTC-USD/spot                              Coinbase-shape JSON
+/price                                                native shape, latest Block Window Price
+/price?date=YYYY-MM-DD                                native shape, UTXOracle Consensus Price for that date
+/healthz                                              {"ok": true}
+/                                                     status / about page
+```
+
+Start it with `utxoracle-serve start` (or from the **UTXOracle Price** tab in `bot-menu`). Stop with `utxoracle-serve stop`. State and logs live under `~/.local/state/bot/`.
+
+**Use with Sparrow Wallet.** Sparrow's stable releases don't yet support a custom price-source URL. The local server is here as the foundation: any tool that *does* take a custom URL can use it today, and we plan to file an upstream feature request with Sparrow for a Custom URL exchange source. Until then, set Sparrow's currency source to **None** for strict privacy or one of its built-in sources (which will reach out over Tor).
+
+**License posture.** All price-bearing responses include `_meta.source` naming the output canonically as "UTXOracle Block Window Price" or "UTXOracle Consensus Price" per UTXOracle License v1.0 §2.4. The status page surfaces the canonical labels and the YouTube live-stream link per §2.7. The license itself is bundled at `~/.local/share/bot/utxoracle/LICENSE.txt`.
 
 ## Install
 

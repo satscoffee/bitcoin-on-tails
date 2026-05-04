@@ -1,0 +1,166 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
+#
+# utxoracle-serve — start/stop/status control for the local UTXOracle
+# HTTP price oracle. Wraps utxoracle-serve.py with friendly subcommands:
+#
+#   utxoracle-serve start    Start the daemon in the background
+#   utxoracle-serve stop     Stop the daemon
+#   utxoracle-serve status   Show pid + port + last log lines
+#   utxoracle-serve restart  Stop, then start
+#   utxoracle-serve url      Print the URL bound to (e.g. http://127.0.0.1:17601)
+#   utxoracle-serve open     Open the status page in the default browser
+#
+# Why a bash wrapper:
+#   - bot-menu can shell out to `utxoracle-serve start` from a yad button
+#     without needing to know about pidfiles or nohup.
+#   - The Python daemon stays foreground-friendly so users can also run it
+#     directly with `utxoracle-serve.py --port N` for debugging.
+#
+# Bind address is always 127.0.0.1; not configurable on purpose.
+
+set -u
+
+DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
+DATA_DIR="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bitcoin}"
+PORT="${UTXORACLE_SERVE_PORT:-17601}"
+
+UTXO_DIR="$DOTFILES/.local/share/bot/utxoracle"
+DAEMON="$UTXO_DIR/utxoracle-serve.py"
+PID_FILE="${XDG_RUNTIME_DIR:-/tmp}/utxoracle-serve.pid"
+LOG_FILE="$DOTFILES/.local/state/bot/utxoracle-serve.log"
+
+cmd="${1:-status}"
+
+read_pid() {
+    [ -s "$PID_FILE" ] || return 1
+    cat "$PID_FILE"
+}
+
+is_running() {
+    local pid; pid=$(read_pid) || return 1
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+case "$cmd" in
+    start)
+        if is_running; then
+            echo "utxoracle-serve already running (pid $(read_pid))"
+            exit 0
+        fi
+        if [ ! -x "$DAEMON" ] && [ ! -f "$DAEMON" ]; then
+            echo "Daemon script missing at $DAEMON" >&2
+            echo "Re-run \`b\` to repair the BoT install." >&2
+            exit 1
+        fi
+        if ! command -v bitcoin-cli >/dev/null 2>&1; then
+            echo "bitcoin-cli not found on PATH. Install Bitcoin Core or Knots first via \`b\`." >&2
+            exit 1
+        fi
+        mkdir -p "$(dirname "$LOG_FILE")"
+        # nohup so the daemon survives the parent shell exiting; setsid so
+        # signals to the parent terminal don't propagate (e.g. closing the
+        # bot-menu yad-spawned terminal does not kill the server).
+        export DOTFILES DATA_DIR
+        nohup setsid python3 "$DAEMON" --port "$PORT" >>"$LOG_FILE" 2>&1 &
+        # Give it a moment to write its PID file.
+        for _ in 1 2 3 4 5 6 7 8; do
+            sleep 0.25
+            is_running && break
+        done
+        if is_running; then
+            echo "utxoracle-serve started on http://127.0.0.1:$PORT (pid $(read_pid))"
+        else
+            echo "utxoracle-serve failed to start. Tail of log:" >&2
+            tail -n 20 "$LOG_FILE" 2>/dev/null >&2
+            exit 1
+        fi
+        ;;
+
+    stop)
+        if ! is_running; then
+            echo "utxoracle-serve not running"
+            rm -f "$PID_FILE"
+            exit 0
+        fi
+        pid=$(read_pid)
+        kill -TERM "$pid" 2>/dev/null
+        # Wait up to 5 s for graceful shutdown
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            sleep 0.5
+            kill -0 "$pid" 2>/dev/null || break
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Did not exit on SIGTERM after 5s; sending SIGKILL." >&2
+            kill -KILL "$pid" 2>/dev/null
+        fi
+        rm -f "$PID_FILE"
+        echo "utxoracle-serve stopped"
+        ;;
+
+    restart)
+        "$0" stop
+        sleep 0.5
+        "$0" start
+        ;;
+
+    status)
+        if is_running; then
+            pid=$(read_pid)
+            echo "utxoracle-serve: running"
+            echo "  pid:  $pid"
+            echo "  url:  http://127.0.0.1:$PORT"
+            echo "  log:  $LOG_FILE"
+            if command -v curl >/dev/null 2>&1; then
+                if curl -fsS --max-time 3 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+                    echo "  http: ok (responding to /healthz)"
+                else
+                    echo "  http: NOT responding to /healthz"
+                fi
+            fi
+        else
+            echo "utxoracle-serve: stopped"
+            echo "  start with: utxoracle-serve start"
+        fi
+        ;;
+
+    url)
+        echo "http://127.0.0.1:$PORT"
+        ;;
+
+    open)
+        if ! is_running; then
+            echo "utxoracle-serve is not running. Starting it first..." >&2
+            "$0" start || exit 1
+        fi
+        xdg-open "http://127.0.0.1:$PORT/" >/dev/null 2>&1 &
+        ;;
+
+    -h|--help|help)
+        cat <<EOF
+utxoracle-serve — local Bitcoin price oracle backed by UTXOracle.
+
+Usage:
+  utxoracle-serve start      Start the daemon (background)
+  utxoracle-serve stop       Stop the daemon
+  utxoracle-serve restart    Stop, then start
+  utxoracle-serve status     Show running state, pid, URL
+  utxoracle-serve url        Print the URL the daemon binds to
+  utxoracle-serve open       Open the status page in the default browser
+  utxoracle-serve help       This message
+
+Environment:
+  UTXORACLE_SERVE_PORT       Override port (default 17601)
+
+The daemon is bound to 127.0.0.1 only. License: see
+\$DOTFILES/.local/share/bot/utxoracle/LICENSE.txt.
+EOF
+        ;;
+
+    *)
+        echo "Unknown command: $cmd" >&2
+        "$0" help >&2
+        exit 1
+        ;;
+esac

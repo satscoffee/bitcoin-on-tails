@@ -483,7 +483,7 @@ build_utxoracle_tab() {
         return
     fi
 
-    # Last-run summary from the wrapper's KV sidecar.
+    # Last-run summary from the wrapper's KV sidecar (one-shot CLI runs).
     local last_iso last_html last_line mode mode_label canonical
     last_iso=$(kv_get  "$utxo_kv" last_run_iso    || true)
     last_html=$(kv_get "$utxo_kv" last_html       || true)
@@ -496,32 +496,59 @@ build_utxoracle_tab() {
     [ -z "$last_iso" ]  && last_iso="—"
     [ -z "$last_line" ] && last_line="(no run on file yet)"
 
-    # Action commands. mk_action wraps in x-terminal-emulator + bash -lc so
-    # the user sees UTXOracle's progress output.
-    local cmd_consensus cmd_block cmd_show
+    # Local HTTP server status (utxoracle-serve). Decoupled from the one-shot
+    # wrapper above — the server runs in the background and refreshes on
+    # each new confirmed block. Reading PID + healthz here is non-blocking.
+    local server_port server_url server_status server_pid server_pid_file
+    server_port="${UTXORACLE_SERVE_PORT:-17601}"
+    server_url="http://127.0.0.1:$server_port"
+    server_pid_file="${XDG_RUNTIME_DIR:-/tmp}/utxoracle-serve.pid"
+    if [ -s "$server_pid_file" ]; then
+        server_pid=$(cat "$server_pid_file" 2>/dev/null)
+        if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+            server_status="Running on $server_url (pid $server_pid)"
+        else
+            server_status="Stopped (stale PID file)"
+        fi
+    else
+        server_status="Stopped"
+    fi
+
+    # Action commands.
+    local cmd_consensus cmd_block cmd_show cmd_serve_start cmd_serve_stop cmd_serve_open cmd_serve_status
     cmd_consensus="$(mk_action 'BoT — UTXOracle Consensus Price' 'utxoracle')"
     cmd_block="$(mk_action 'BoT — UTXOracle Block Window Price' 'utxoracle -rb')"
     if [ -n "$last_html" ] && [ -s "$last_html" ]; then
-        # xdg-open routes file:// URLs through Tor Browser on Tails.
         cmd_show="xdg-open $(printf '%q' "$last_html") >/dev/null 2>&1 &"
     else
         cmd_show="zenity --info --title='No chart yet' \
             --text='Run UTXOracle Consensus Price or UTXOracle Block Window Price first to generate a chart.' \
             --ellipsize $ICON_ARG &"
     fi
+    # Server controls go through utxoracle-serve. Wrap in a terminal so
+    # users see start-up logs and can read errors before the window closes.
+    cmd_serve_start="$(mk_action  'BoT — start utxoracle-serve'  'utxoracle-serve start')"
+    cmd_serve_stop="$(mk_action   'BoT — stop utxoracle-serve'   'utxoracle-serve stop')"
+    cmd_serve_status="$(mk_action 'BoT — utxoracle-serve status' 'utxoracle-serve status')"
+    cmd_serve_open="utxoracle-serve open >/dev/null 2>&1 &"
 
-    # Static descriptive blurb. Canonical names retained per UTXOracle License v1.0.
-    canonical="<b>UTXOracle</b> derives a Bitcoin price from <b>your own node's data only</b> — no third-party APIs, no IP leaks. Bundled snapshot from <tt>utxo.live</tt>; license preserved at <tt>$XDG_DATA_HOME/bot/utxoracle/LICENSE.txt</tt>."
+    canonical="<b>UTXOracle</b> derives a Bitcoin price from <b>your own node's data only</b> — no third-party APIs, no IP leaks. Bundled snapshot from <tt>utxo.live</tt>; license preserved at <tt>$XDG_DATA_HOME/bot/utxoracle/LICENSE.txt</tt>.\n\n<b>Local HTTP price server (utxoracle-serve):</b> binds to <tt>127.0.0.1</tt> only, refreshes on each new confirmed block, exposes CoinGecko/Coinbase-shape endpoints + a native /price?date= for historical lookups. Sparrow Wallet doesn't yet support custom price-source URLs in its stable release; this server is the foundation. From a terminal: <tt>btcprice</tt> for the latest price, <tt>btcprice 2024-04-15</tt> for a date."
 
     yad --plug="$key" --tabnum=4 \
         --form --columns=1 \
-        --field="<b>UTXOracle Price (local node)</b>:LBL" "" \
+        --field="<b>UTXOracle one-shot</b>:LBL" "" \
         --field="Last run:RO"      "$last_iso" \
         --field="Last result:RO"   "$last_line" \
         --field="Mode:RO"          "$mode_label" \
         --field="Show last chart:FBTN"                                "$cmd_show" \
         --field="Compute UTXOracle Consensus Price (yesterday):FBTN"  "$cmd_consensus" \
         --field="Compute UTXOracle Block Window Price (last 144):FBTN" "$cmd_block" \
+        --field="<b>Local price server</b>:LBL" "" \
+        --field="Server status:RO" "$server_status" \
+        --field="Start utxoracle-serve:FBTN" "$cmd_serve_start" \
+        --field="Stop utxoracle-serve:FBTN"  "$cmd_serve_stop" \
+        --field="Show server status:FBTN"    "$cmd_serve_status" \
+        --field="Open status page in browser:FBTN" "$cmd_serve_open" \
         --field=":LBL" "$canonical" &
 }
 

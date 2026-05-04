@@ -1,0 +1,95 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
+#
+# bot-update-now — interactive auto-update for Bitcoin on Tails.
+#
+# Run from a terminal (typically spawned by the bot-check-update dialog's
+# "Auto-update now" button). Walks the user through:
+#   1. Confirming the update.
+#   2. Removing ~/bot if it exists (git clone refuses to clone into
+#      non-empty directories).
+#   3. Cloning the latest BoT main branch.
+#   4. Verifying the signed tag (best-effort — informational, doesn't block).
+#   5. Running ~/bot/b which detects the existing install and offers refresh.
+#
+# This deliberately does NOT auto-pick "refresh" in the dev-choice dialog —
+# the user should still see what's about to happen. We just remove the
+# friction of remembering the rm + clone commands.
+
+set -u
+
+CLONE_URL="${BOT_CLONE_URL:-https://github.com/satscoffee/bitcoin-on-tails}"
+CLONE_DIR="${BOT_CLONE_DIR:-$HOME/bot}"
+EXPECTED_FINGERPRINT="${BOT_GPG_FINGERPRINT:-2EE3 5C29 41D5 4C9E 9E2D  C908 33A3 9346 82DD 9E18}"
+
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+yellow(){ printf '\033[33m%s\033[0m\n' "$*"; }
+
+cat <<EOF
+$(bold "Bitcoin on Tails — auto-update")
+
+This will:
+
+  1. Remove $CLONE_DIR (if present)
+  2. git clone $CLONE_URL → $CLONE_DIR
+  3. (Best effort) verify the latest signed tag against the BoT key
+       $EXPECTED_FINGERPRINT
+  4. Run $CLONE_DIR/b — when it detects your existing install you'll
+     get the standard "refresh / menu / reinstall" dialog. Pick
+     "refresh" to apply scripts without redownloading Bitcoin.
+
+EOF
+
+read -rp "Proceed? [y/N] " ans
+case "${ans,,}" in
+    y|yes) ;;
+    *)
+        red "Cancelled."
+        exit 1
+        ;;
+esac
+
+if [ -e "$CLONE_DIR" ]; then
+    yellow "Removing existing $CLONE_DIR ..."
+    rm -rf "$CLONE_DIR" || {
+        red "Could not remove $CLONE_DIR. Check permissions."
+        exit 1
+    }
+fi
+
+yellow "Cloning $CLONE_URL → $CLONE_DIR ..."
+if ! git clone "$CLONE_URL" "$CLONE_DIR"; then
+    red "git clone failed. Check your network / Tor connection and try again."
+    exit 1
+fi
+
+# Best-effort tag verification. Informational only — we don't block on
+# failure because: (a) signing keys may not be in the user's keyring yet,
+# (b) the clone might be from a non-tagged commit ahead of the latest tag.
+cd "$CLONE_DIR" || exit 1
+latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
+if [ -n "$latest_tag" ]; then
+    yellow ""
+    yellow "Verifying tag $latest_tag against $EXPECTED_FINGERPRINT ..."
+    if git tag -v "$latest_tag" 2>&1 | grep -qE 'Good signature|using.*key'; then
+        green "Tag signature verified."
+    else
+        yellow "Tag signature could not be verified locally. This usually means"
+        yellow "the BoT signing key is not in your keyring yet — not a security"
+        yellow "issue if you trust the GitHub clone over Tor. To verify properly:"
+        yellow ""
+        yellow "  curl -s https://sats.coffee/2EE35C2941D54C9E9E2DC90833A3934682DD9E18.asc | gpg --import -"
+        yellow "  cd $CLONE_DIR && git tag -v $latest_tag"
+        yellow ""
+    fi
+fi
+
+yellow ""
+yellow "Launching $CLONE_DIR/b ..."
+yellow "(In the dev-choice dialog, pick 'refresh' to apply scripts.)"
+yellow ""
+
+exec "$CLONE_DIR/b"

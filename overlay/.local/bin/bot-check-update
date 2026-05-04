@@ -2,24 +2,22 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
 #
-# bot-check-update — check whether the installed BoT clone is behind origin.
-# Does NOT install anything. Reports status via zenity (and stdout for terminal
-# users). Used by the bot-menu Status tab "Check for BoT updates" button.
+# bot-check-update — check whether the installed BoT clone is behind origin,
+# and surface results in a yad dialog where the manual update commands are
+# selectable/copyable text. Also offers an "Auto-update now" button that
+# runs `bot-update-now` in a fresh terminal.
 #
-# Why a separate script: bot-menu lives inside Persistent Storage and runs
-# as a yad notebook; spawning a long-running git fetch from inside a yad
-# button handler is ugly. A standalone wrapper means we can spawn it in a
-# terminal (`mk_action` style) where the user sees git's progress, and the
-# zenity follow-up dialog clearly answers "did this find anything?"
+# Does NOT install anything by itself.
 
 set -u
 
 DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
 INSTALLED_BOT_DIR="${INSTALLED_BOT_DIR:-$DOTFILES/.local/share/bot}"
-WAYLAND_DISPLAY=""   # so zenity windows render the icon properly
-ICON="--window-icon=$HOME/.local/share/icons/bot128.png"
+WAYLAND_DISPLAY=""
+ICON_FILE="$HOME/.local/share/icons/bot128.png"
+ICON_ARG="--window-icon=$ICON_FILE"
 
-# Inherited from b. Defined here too so this script works standalone.
+# bot_raise_dialog fallback
 type bot_raise_dialog >/dev/null 2>&1 || bot_raise_dialog() {
     local title="$1"
     [ -z "$title" ] && return 0
@@ -37,66 +35,106 @@ type bot_raise_dialog >/dev/null 2>&1 || bot_raise_dialog() {
     ) >/dev/null 2>&1 &
 }
 
+mk_terminal_action() {
+    # Spawn a new terminal that runs the given command, and pauses so the
+    # user can read output before closing.
+    local title="$1" cmd="$2"
+    printf 'x-terminal-emulator -T %q -e bash -lc %q &' "$title" \
+        "$cmd; echo; read -rsn 1 -p 'Press any key to close. ' _; echo"
+}
+
+# --- Validate state ---------------------------------------------------------
+
 if [ ! -d "$INSTALLED_BOT_DIR/.git" ]; then
-    msg="The installed BoT directory at\n<tt>$INSTALLED_BOT_DIR</tt>\nisn't a git checkout, so I can't check for updates against origin.\n\nThis can happen if you installed BoT from a release tarball rather than a git clone. To get update checking, re-install via:\n\n<tt>git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot &amp;&amp; ~/bot/b</tt>"
-    echo "bot-check-update: $INSTALLED_BOT_DIR is not a git checkout."
+    msg="The installed BoT directory at\n<tt>$INSTALLED_BOT_DIR</tt>\nisn't a git checkout, so I can't check for updates against origin.\n\nTo get update checking, re-install via:\n\n<tt>git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot &amp;&amp; ~/bot/b</tt>"
     bot_raise_dialog "Cannot check for updates"
-    zenity --warning --title="Cannot check for updates" --text="$msg" --width=520 "$ICON" --icon-name=dialog-warning 2>/dev/null
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --warning --title="Cannot check for updates" --text="$msg" --width=520 \
+            "$ICON_ARG" --icon-name=dialog-warning 2>/dev/null
+    fi
+    echo "bot-check-update: $INSTALLED_BOT_DIR is not a git checkout."
     exit 1
 fi
 
 cd "$INSTALLED_BOT_DIR" || exit 1
 
-# Get the configured remote and branch. Default to origin/main.
 remote=$(git remote 2>/dev/null | head -1)
 remote="${remote:-origin}"
-branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
 default_branch=$(git symbolic-ref --short "refs/remotes/$remote/HEAD" 2>/dev/null \
                  | sed "s|^$remote/||" || true)
-default_branch="${default_branch:-$branch}"
+default_branch="${default_branch:-main}"
 
 local_ver=$(./b --version 2>/dev/null | sed 's/^Bitcoin on Tails //')
 [ -z "$local_ver" ] && local_ver="(unknown)"
 
 echo "Checking for BoT updates against $remote/$default_branch over Tor..."
-echo "(This may take a few seconds.)"
+echo "(This can take a few seconds.)"
 echo
 
-# Fetch over Tor. tags + the default branch only — no need for the world.
+# --- Fetch ------------------------------------------------------------------
+
 if ! git fetch --tags --quiet "$remote" "$default_branch" 2>&1; then
     bot_raise_dialog "Update check failed"
     zenity --error --title="Update check failed" \
-        --text="Could not reach <tt>$remote</tt> to check for BoT updates. This is usually a slow or stuck Tor circuit, or no network connection.\n\nTry again in a moment, or open a terminal and run <tt>cd $INSTALLED_BOT_DIR &amp;&amp; git fetch</tt> for the raw git error." \
-        --width=520 "$ICON" --icon-name=dialog-error 2>/dev/null
+        --text="Could not reach <tt>$remote</tt> to check for BoT updates.\n\nThis is usually a slow or stuck Tor circuit, or no network connection.\n\nTry again in a moment, or open a terminal and run <tt>cd $INSTALLED_BOT_DIR &amp;&amp; git fetch</tt> for the raw git error." \
+        --width=520 "$ICON_ARG" --icon-name=dialog-error 2>/dev/null
     exit 2
 fi
 
-# How many commits is HEAD behind origin/<default_branch>?
 behind=$(git rev-list --count "HEAD..$remote/$default_branch" 2>/dev/null || echo 0)
 ahead=$(git  rev-list --count "$remote/$default_branch..HEAD" 2>/dev/null || echo 0)
-
-# Latest tag on the remote default branch — most useful "is there a new
-# release" signal, since BoT cuts signed tags per release.
-latest_tag=$(git describe --tags --abbrev=0 "$remote/$default_branch" 2>/dev/null || echo "")
-local_tag=$(git  describe --tags --abbrev=0 HEAD                      2>/dev/null || echo "")
+latest_tag=$(git describe --tags --abbrev=0 "$remote/$default_branch" 2>/dev/null || echo "(none)")
 
 echo "Installed: $local_ver"
-echo "Latest tag on $remote/$default_branch: ${latest_tag:-unknown}"
-echo "Commits behind: $behind"
-echo "Commits ahead:  $ahead"
+echo "Latest tag on $remote/$default_branch: $latest_tag"
+echo "Commits behind: $behind  |  ahead: $ahead"
+
+# --- Up-to-date branch ------------------------------------------------------
 
 if [ "$behind" -eq 0 ]; then
-    msg="<b>Bitcoin on Tails is up to date.</b>\n\nInstalled: <tt>$local_ver</tt>\nLatest tag on $remote/$default_branch: <tt>${latest_tag:-unknown}</tt>"
+    extra=""
     if [ "$ahead" -gt 0 ]; then
-        msg="$msg\n\nNote: your local clone has $ahead commit(s) <i>ahead</i> of $remote/$default_branch — looks like a working tree."
+        extra="\n\nNote: your local clone has $ahead commit(s) <i>ahead</i> of $remote/$default_branch — looks like a working tree."
     fi
     bot_raise_dialog "Bitcoin on Tails is up to date"
-    zenity --info --title="Bitcoin on Tails is up to date" --text="$msg" --width=520 "$ICON" --icon-name=bot128 2>/dev/null
+    zenity --info --title="Bitcoin on Tails is up to date" \
+        --text="<b>Bitcoin on Tails is up to date.</b>\n\nInstalled: <tt>$local_ver</tt>\nLatest tag on $remote/$default_branch: <tt>$latest_tag</tt>$extra" \
+        --width=520 "$ICON_ARG" --icon-name=bot128 2>/dev/null
     exit 0
 fi
 
-# Updates available. We do NOT install — just tell the user how.
-msg="<b>Update available.</b>\n\nInstalled: <tt>$local_ver</tt>\nLatest tag on $remote/$default_branch: <tt>${latest_tag:-unknown}</tt>\n$behind commit(s) behind $remote/$default_branch.\n\nBoT will <b>not</b> install the update automatically. To update, open a terminal and run:\n\n<tt>git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot &amp;&amp; ~/bot/b</tt>\n\nor, on a working tree:\n\n<tt>cd $INSTALLED_BOT_DIR &amp;&amp; git pull &amp;&amp; ./b</tt>\n\n(Verify the signed tag with <tt>git tag -v</tt> first if you want belt-and-suspenders.)"
-bot_raise_dialog "Bitcoin on Tails update available"
-zenity --info --title="Bitcoin on Tails update available" --text="$msg" --width=620 "$ICON" --icon-name=software-update-available 2>/dev/null
+# --- Updates available — yad form with copyable commands -------------------
+
+# Yad's TXT/RO field renders selectable text with copy-friendly behavior.
+# We give the user three options:
+#   1. Auto-update now (button)        runs bot-update-now in a fresh terminal
+#   2. Copy the manual one-liner       text is selectable in the dialog
+#   3. Cancel                          (default)
+
+manual_cmd_clone='git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot && ~/bot/b'
+manual_cmd_pull="cd $INSTALLED_BOT_DIR && git pull && ./b"
+manual_cmd_verify="cd $INSTALLED_BOT_DIR && git tag -v $latest_tag"
+
+cmd_auto_update="$(mk_terminal_action 'BoT — auto-update' 'bot-update-now')"
+
+# yad notebook would be overkill; a single form with TXT fields is cleaner.
+# --button= lets us emit one button per action with distinct exit codes.
+bot_raise_dialog "Bitcoin on Tails — update available"
+yad --form --columns=1 --width=640 --height=460 \
+    --title="Bitcoin on Tails — update available" \
+    --image="$ICON_FILE" --image-on-top \
+    --field="<b>Update available.</b>:LBL" "" \
+    --field="Installed:RO"               "$local_ver" \
+    --field="Latest published tag:RO"    "$latest_tag" \
+    --field="Commits behind $remote/$default_branch:RO" "$behind" \
+    --field=":LBL" "Pick how you want to update. BoT will not update automatically — you have to choose." \
+    --field="Auto-update now (recommended):FBTN" "$cmd_auto_update" \
+    --field="<b>Or copy and paste one of these instead:</b>:LBL" "" \
+    --field="Fresh clone (replaces ~/bot):RO" "$manual_cmd_clone" \
+    --field="In-place pull (working tree):RO" "$manual_cmd_pull" \
+    --field="Verify tag signature first:RO"   "$manual_cmd_verify" \
+    --field=":LBL" "Tip: click into a field above and press Ctrl+C to copy it." \
+    --button="gtk-close:0" \
+    "$ICON_ARG"
+
 exit 0

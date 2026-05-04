@@ -1,0 +1,121 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
+#
+# btcprice — terminal one-liner that hits the local utxoracle-serve daemon.
+#
+#   btcprice                  Latest UTXOracle Block Window Price
+#   btcprice 2024-04-15       UTXOracle Consensus Price for that date
+#   btcprice --json           Latest, raw JSON
+#   btcprice --start          Start the daemon if it isn't running
+#   btcprice --status         Print daemon status
+#   btcprice --help
+#
+# Why this exists: bot-menu surfaces the price visually, but in a terminal
+# you just want a number. This is that.
+
+set -u
+
+PORT="${UTXORACLE_SERVE_PORT:-17601}"
+URL="http://127.0.0.1:$PORT"
+
+usage() {
+    cat <<EOF
+btcprice — terminal price lookup, backed by your local utxoracle-serve.
+
+Usage:
+  btcprice                  Print the latest UTXOracle Block Window Price.
+  btcprice YYYY-MM-DD       Print the UTXOracle Consensus Price for that date.
+  btcprice --json [DATE]    Same, but raw JSON.
+  btcprice --start          Start utxoracle-serve if it isn't already running.
+  btcprice --status         Print daemon status.
+  btcprice --help           This message.
+
+Examples:
+  btcprice
+  btcprice 2024-04-15
+  btcprice --json 2024-04-15
+
+Requires \`utxoracle-serve\` to be running. Use \`btcprice --start\` if not.
+EOF
+}
+
+ensure_running() {
+    if ! curl -fsS --max-time 2 "$URL/healthz" >/dev/null 2>&1; then
+        echo "btcprice: utxoracle-serve is not running on $URL." >&2
+        echo "          Start it with: utxoracle-serve start" >&2
+        echo "          Or:           btcprice --start" >&2
+        exit 1
+    fi
+}
+
+print_pretty() {
+    local body="$1"
+    # The relevant fields are price_usd, label, last_block_height (optional), date (optional).
+    # Use python json so we don't add a jq dep.
+    python3 - "$body" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+label = data.get("label", "Price")
+price = data.get("price_usd")
+height = data.get("last_block_height")
+date = data.get("date")
+iso = data.get("computed_at_iso", "")
+if price is None:
+    print("(no price returned)", file=sys.stderr)
+    sys.exit(2)
+suffix_bits = []
+if date:
+    suffix_bits.append(date)
+if height is not None:
+    suffix_bits.append("block " + str(height))
+if iso:
+    suffix_bits.append(iso)
+suffix = ", ".join(suffix_bits)
+print("${:,}  ({}{})".format(price, label, ", " + suffix if suffix else ""))
+PY
+}
+
+cmd="${1:-}"
+
+case "$cmd" in
+    -h|--help|help)
+        usage
+        exit 0
+        ;;
+    --status)
+        exec utxoracle-serve status
+        ;;
+    --start)
+        exec utxoracle-serve start
+        ;;
+    --json)
+        ensure_running
+        if [ -n "${2:-}" ]; then
+            curl -fsS "$URL/price?date=$2" || { echo "btcprice: lookup failed" >&2; exit 1; }
+        else
+            curl -fsS "$URL/price" || { echo "btcprice: lookup failed" >&2; exit 1; }
+        fi
+        echo
+        ;;
+    "")
+        ensure_running
+        body=$(curl -fsS "$URL/price") || { echo "btcprice: lookup failed" >&2; exit 1; }
+        print_pretty "$body"
+        ;;
+    *)
+        # Treat as a date arg
+        if [[ "$cmd" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            ensure_running
+            body=$(curl -fsS "$URL/price?date=$cmd") || {
+                echo "btcprice: no UTXOracle Consensus Price available for $cmd" >&2
+                exit 1
+            }
+            print_pretty "$body"
+        else
+            echo "btcprice: unknown argument '$cmd'" >&2
+            usage >&2
+            exit 1
+        fi
+        ;;
+esac
