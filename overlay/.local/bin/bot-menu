@@ -271,10 +271,16 @@ build_status_tab() {
     local btc_update sparrow_update
     btc_update="$(update_status_line "${dist:-core}")"
     sparrow_update="$(update_status_line sparrow)"
+    # "Check for BoT updates" — read-only check, no auto-install. Spawned in
+    # a terminal so the user sees git fetch's progress; the script itself
+    # pops a zenity dialog with the result.
+    local cmd_bot_check_update
+    cmd_bot_check_update="$(mk_action 'BoT — checking for updates' 'bot-check-update')"
     yad --plug="$key" --tabnum=1 \
         --form --columns=1 \
         --field="<b>Bitcoin on Tails</b>:LBL" "" \
         --field="Version:RO" "$(get_bot_version)" \
+        --field="Check for BoT updates:FBTN" "$cmd_bot_check_update" \
         --field="<b>Node</b>:LBL" "" \
         --field="Implementation:RO" "$(get_bitcoin_impl)" \
         --field="Version:RO" "$(get_bitcoin_version)" \

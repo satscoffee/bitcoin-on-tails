@@ -7,12 +7,34 @@
 # and launches install-core or install-knots.
 ###############################################################################
 
-export VERSION='v0.8.0-alpha'
+export VERSION='v0.8.1-alpha'
 export WAYLAND_DISPLAY="" # Needed for zenity dialogs to have window icon
 export ICON="--window-icon=$HOME/.local/share/icons/bot128.png"
 export DOTFILES='/live/persistence/TailsData_unlocked/dotfiles'
 readonly SECURITY_IN_A_BOX_URL="https://securityinabox.org/en/"
 BOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# PATH hardening — runs BEFORE any dispatch, so every code path benefits.
+#
+# Why this matters: Tails' GNOME Console launches an interactive non-login
+# shell, which does NOT source ~/.profile. The default Debian ~/.profile is
+# what adds ~/.local/bin to PATH. So a freshly-opened Console window has
+# neither `b` nor `install-core` / `install-knots` / `utxoracle` / etc. on
+# PATH, even though all of them exist as symlinks under ~/.local/bin.
+#
+# The same issue bites .desktop launchers and any non-login shell. We work
+# around it here so every BoT command "just works" no matter how b was
+# invoked. We also source ~/.profile if it exists so anything else the user
+# put in there (custom env, aliases-in-functions, etc.) is honored.
+[ -f "$HOME/.profile" ] && . "$HOME/.profile" >/dev/null 2>&1 || true
+for _bot_path in "$HOME/.local/bin" "$DOTFILES/.local/bin"; do
+    [ -d "$_bot_path" ] || continue
+    case ":$PATH:" in
+        *":$_bot_path:"*) ;;
+        *) export PATH="$_bot_path:$PATH" ;;
+    esac
+done
+unset _bot_path
 
 ###############################################################################
 # bot_raise_dialog TITLE
@@ -118,6 +140,22 @@ elif [ "$1" == "--check" ] || [ "$1" == "--update" ] || [ "$1" == "--uninstall" 
   # is a fallback for old installs predating the marker.
   STATE_HOME="${XDG_STATE_HOME:-/live/persistence/TailsData_unlocked/dotfiles/.local/state}"
   marker="$STATE_HOME/bot/dist"
+
+  # PATH hardening: this branch may be reached from a context that didn't
+  # source ~/.profile (e.g. the .desktop launcher, a non-login shell, the
+  # initial Console session if Dotfiles haven't relinked yet). Without
+  # ~/.local/bin / $DOTFILES/.local/bin on PATH, the `exec install-$dist`
+  # call below fails with "command not found" even though the script exists
+  # on disk. Same defensive prepend bot-menu does.
+  for _bot_path in "$HOME/.local/bin" "$DOTFILES/.local/bin"; do
+      [ -d "$_bot_path" ] || continue
+      case ":$PATH:" in
+          *":$_bot_path:"*) ;;
+          *) export PATH="$_bot_path:$PATH" ;;
+      esac
+  done
+  unset _bot_path
+
   dist=""
   if [ -s "$marker" ]; then
     dist="$(head -1 "$marker" | tr -d '[:space:]')"
@@ -130,7 +168,42 @@ elif [ "$1" == "--check" ] || [ "$1" == "--update" ] || [ "$1" == "--uninstall" 
   fi
   case "$dist" in
     core|knots)
-      exec "install-$dist" "$1"
+      # Resolve the installer absolutely so a still-broken PATH gives a
+      # clearer error than "command not found" if something else is wrong.
+      installer="$(command -v "install-$dist" 2>/dev/null \
+        || { [ -x "$DOTFILES/.local/bin/install-$dist" ] && echo "$DOTFILES/.local/bin/install-$dist"; })"
+
+      # Self-heal: if the installer is missing from $DOTFILES but the
+      # overlay snapshot in $INSTALLED_BOT_DIR still has it, rsync the
+      # overlay back into $DOTFILES and re-link dotfiles. This recovers
+      # from "files vanished from $DOTFILES somehow" without forcing the
+      # user to re-clone. (Common cause: a partial rsync, manual `rm`, or
+      # an interrupted earlier install.)
+      if [ -z "$installer" ]; then
+        installed_bot_dir="$DOTFILES/.local/share/bot"
+        overlay_installer="$installed_bot_dir/overlay/.local/bin/install-$dist"
+        if [ -x "$overlay_installer" ]; then
+          echo "b: install-$dist missing from \$DOTFILES/.local/bin/. Restoring from $installed_bot_dir/overlay/ ..." >&2
+          if rsync -rh "$installed_bot_dir/overlay/" "$DOTFILES/" 2>&1; then
+              command -v link-dotfiles >/dev/null 2>&1 && link-dotfiles >/dev/null 2>&1 || true
+              installer="$(command -v "install-$dist" 2>/dev/null \
+                || { [ -x "$DOTFILES/.local/bin/install-$dist" ] && echo "$DOTFILES/.local/bin/install-$dist"; })"
+              [ -n "$installer" ] && echo "b: restored. Continuing with --$1 ..." >&2
+          fi
+        fi
+      fi
+
+      if [ -z "$installer" ]; then
+        echo "b: install-$dist not found on PATH or at \$DOTFILES/.local/bin/install-$dist." >&2
+        echo "    PATH=$PATH" >&2
+        echo "    DOTFILES=$DOTFILES" >&2
+        echo "    The overlay snapshot at \$DOTFILES/.local/share/bot/overlay/ also appears to be missing this file." >&2
+        echo "    To recover, run a fresh clone:" >&2
+        echo "       git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot && ~/bot/b" >&2
+        echo "    and pick \"refresh\" when prompted (it won't redownload Bitcoin)." >&2
+        exit 1
+      fi
+      exec "$installer" "$1"
       ;;
     *)
       echo "b: no Bitcoin implementation installed yet. Run \`b\` with no arguments to install one." >&2

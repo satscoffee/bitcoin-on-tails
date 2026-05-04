@@ -1,0 +1,102 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
+#
+# bot-check-update — check whether the installed BoT clone is behind origin.
+# Does NOT install anything. Reports status via zenity (and stdout for terminal
+# users). Used by the bot-menu Status tab "Check for BoT updates" button.
+#
+# Why a separate script: bot-menu lives inside Persistent Storage and runs
+# as a yad notebook; spawning a long-running git fetch from inside a yad
+# button handler is ugly. A standalone wrapper means we can spawn it in a
+# terminal (`mk_action` style) where the user sees git's progress, and the
+# zenity follow-up dialog clearly answers "did this find anything?"
+
+set -u
+
+DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
+INSTALLED_BOT_DIR="${INSTALLED_BOT_DIR:-$DOTFILES/.local/share/bot}"
+WAYLAND_DISPLAY=""   # so zenity windows render the icon properly
+ICON="--window-icon=$HOME/.local/share/icons/bot128.png"
+
+# Inherited from b. Defined here too so this script works standalone.
+type bot_raise_dialog >/dev/null 2>&1 || bot_raise_dialog() {
+    local title="$1"
+    [ -z "$title" ] && return 0
+    (
+        local i=0 wid=""
+        while [ "$i" -lt 12 ]; do
+            sleep 0.3
+            command -v wmctrl >/dev/null 2>&1 && wmctrl -F -a "$title" 2>/dev/null && break
+            if command -v xdotool >/dev/null 2>&1; then
+                wid=$(xdotool search --name "$title" 2>/dev/null | tail -1)
+                [ -n "$wid" ] && xdotool windowactivate "$wid" 2>/dev/null && break
+            fi
+            i=$((i+1))
+        done
+    ) >/dev/null 2>&1 &
+}
+
+if [ ! -d "$INSTALLED_BOT_DIR/.git" ]; then
+    msg="The installed BoT directory at\n<tt>$INSTALLED_BOT_DIR</tt>\nisn't a git checkout, so I can't check for updates against origin.\n\nThis can happen if you installed BoT from a release tarball rather than a git clone. To get update checking, re-install via:\n\n<tt>git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot &amp;&amp; ~/bot/b</tt>"
+    echo "bot-check-update: $INSTALLED_BOT_DIR is not a git checkout."
+    bot_raise_dialog "Cannot check for updates"
+    zenity --warning --title="Cannot check for updates" --text="$msg" --width=520 "$ICON" --icon-name=dialog-warning 2>/dev/null
+    exit 1
+fi
+
+cd "$INSTALLED_BOT_DIR" || exit 1
+
+# Get the configured remote and branch. Default to origin/main.
+remote=$(git remote 2>/dev/null | head -1)
+remote="${remote:-origin}"
+branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
+default_branch=$(git symbolic-ref --short "refs/remotes/$remote/HEAD" 2>/dev/null \
+                 | sed "s|^$remote/||" || true)
+default_branch="${default_branch:-$branch}"
+
+local_ver=$(./b --version 2>/dev/null | sed 's/^Bitcoin on Tails //')
+[ -z "$local_ver" ] && local_ver="(unknown)"
+
+echo "Checking for BoT updates against $remote/$default_branch over Tor..."
+echo "(This may take a few seconds.)"
+echo
+
+# Fetch over Tor. tags + the default branch only — no need for the world.
+if ! git fetch --tags --quiet "$remote" "$default_branch" 2>&1; then
+    bot_raise_dialog "Update check failed"
+    zenity --error --title="Update check failed" \
+        --text="Could not reach <tt>$remote</tt> to check for BoT updates. This is usually a slow or stuck Tor circuit, or no network connection.\n\nTry again in a moment, or open a terminal and run <tt>cd $INSTALLED_BOT_DIR &amp;&amp; git fetch</tt> for the raw git error." \
+        --width=520 "$ICON" --icon-name=dialog-error 2>/dev/null
+    exit 2
+fi
+
+# How many commits is HEAD behind origin/<default_branch>?
+behind=$(git rev-list --count "HEAD..$remote/$default_branch" 2>/dev/null || echo 0)
+ahead=$(git  rev-list --count "$remote/$default_branch..HEAD" 2>/dev/null || echo 0)
+
+# Latest tag on the remote default branch — most useful "is there a new
+# release" signal, since BoT cuts signed tags per release.
+latest_tag=$(git describe --tags --abbrev=0 "$remote/$default_branch" 2>/dev/null || echo "")
+local_tag=$(git  describe --tags --abbrev=0 HEAD                      2>/dev/null || echo "")
+
+echo "Installed: $local_ver"
+echo "Latest tag on $remote/$default_branch: ${latest_tag:-unknown}"
+echo "Commits behind: $behind"
+echo "Commits ahead:  $ahead"
+
+if [ "$behind" -eq 0 ]; then
+    msg="<b>Bitcoin on Tails is up to date.</b>\n\nInstalled: <tt>$local_ver</tt>\nLatest tag on $remote/$default_branch: <tt>${latest_tag:-unknown}</tt>"
+    if [ "$ahead" -gt 0 ]; then
+        msg="$msg\n\nNote: your local clone has $ahead commit(s) <i>ahead</i> of $remote/$default_branch — looks like a working tree."
+    fi
+    bot_raise_dialog "Bitcoin on Tails is up to date"
+    zenity --info --title="Bitcoin on Tails is up to date" --text="$msg" --width=520 "$ICON" --icon-name=bot128 2>/dev/null
+    exit 0
+fi
+
+# Updates available. We do NOT install — just tell the user how.
+msg="<b>Update available.</b>\n\nInstalled: <tt>$local_ver</tt>\nLatest tag on $remote/$default_branch: <tt>${latest_tag:-unknown}</tt>\n$behind commit(s) behind $remote/$default_branch.\n\nBoT will <b>not</b> install the update automatically. To update, open a terminal and run:\n\n<tt>git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot &amp;&amp; ~/bot/b</tt>\n\nor, on a working tree:\n\n<tt>cd $INSTALLED_BOT_DIR &amp;&amp; git pull &amp;&amp; ./b</tt>\n\n(Verify the signed tag with <tt>git tag -v</tt> first if you want belt-and-suspenders.)"
+bot_raise_dialog "Bitcoin on Tails update available"
+zenity --info --title="Bitcoin on Tails update available" --text="$msg" --width=620 "$ICON" --icon-name=software-update-available 2>/dev/null
+exit 0
