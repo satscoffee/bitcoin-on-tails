@@ -605,8 +605,12 @@ build_utxoracle_tab() {
 
     # Action commands.
     local cmd_consensus cmd_block cmd_show cmd_serve_start cmd_serve_stop cmd_serve_status
-    cmd_consensus="$(mk_action 'BoT — UTXOracle Consensus Price' "utxoracle; $refresh")"
-    cmd_block="$(mk_action 'BoT — UTXOracle Block Window Price' "utxoracle -rb; $refresh")"
+    # No `; $refresh` here — auto-refreshing kills bot-menu and re-execs it,
+    # which the user perceives as BoT closing/reopening with each action.
+    # User can click the Refresh button at the bottom of the window when they
+    # want the displayed Last run/Last result fields to update.
+    cmd_consensus="$(mk_action 'BoT — UTXOracle Consensus Price' 'utxoracle')"
+    cmd_block="$(mk_action 'BoT — UTXOracle Block Window Price' 'utxoracle -rb')"
     if [ -n "$last_html" ] && [ -s "$last_html" ]; then
         # `unset WAYLAND_DISPLAY` because bot-menu exports it as empty string
         # at the top of this script, which makes Tor Browser's Wayland Proxy
@@ -621,8 +625,9 @@ build_utxoracle_tab() {
     # Server controls — wrap in a terminal so users see start/stop output.
     # Append $refresh so the bot-menu re-renders with the new server status
     # automatically once the start/stop action returns.
-    cmd_serve_start="$(mk_action  'BoT — start utxoracle-serve'  "utxoracle-serve start; $refresh")"
-    cmd_serve_stop="$(mk_action   'BoT — stop utxoracle-serve'   "utxoracle-serve stop; $refresh")"
+    # Same — no auto-refresh. Use the Refresh button to update Server status.
+    cmd_serve_start="$(mk_action  'BoT — start utxoracle-serve'  'utxoracle-serve start')"
+    cmd_serve_stop="$(mk_action   'BoT — stop utxoracle-serve'   'utxoracle-serve stop')"
     cmd_serve_status="$(mk_action 'BoT — utxoracle-serve status' 'utxoracle-serve status')"
 
     canonical="<b>UTXOracle</b> derives a Bitcoin price from <b>your own node's data only</b> — no third-party APIs, no IP leaks. Bundled snapshot from <tt>utxo.live</tt>; license preserved at <tt>$XDG_DATA_HOME/bot/utxoracle/LICENSE.txt</tt>.\n\n<b>Local HTTP price server (utxoracle-serve):</b> binds to <tt>127.0.0.1</tt> only, refreshes on each new confirmed block, exposes CoinGecko/Coinbase-shape endpoints + a native /price?date= for historical lookups. Accessible from Tor Browser on this Tails session only — external devices and other browsers (including Onion Browser on iOS) cannot reach 127.0.0.1 on this machine. From a terminal: <tt>btcprice</tt> for the latest price, <tt>btcprice 2024-04-15</tt> for a date."

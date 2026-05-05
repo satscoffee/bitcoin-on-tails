@@ -112,6 +112,31 @@ Both are installed via `sudo apt-get install` over Tor on first run. To make the
 
 Run `b` again. It detects an existing install and updates in place.
 
+## Connecting Sparrow Wallet to your local Bitcoin node
+
+Sparrow is bundled but not auto-configured against your BoT-installed node. The first time you run Sparrow, point it at your local Bitcoin Core / Knots over RPC so wallet queries never leak to a third-party Electrum server.
+
+In **Sparrow → Preferences → Server**:
+
+| Setting        | Value                                                                                  |
+|----------------|----------------------------------------------------------------------------------------|
+| Server Type    | **Bitcoin Core**                                                                        |
+| URL            | `http://127.0.0.1:17600/`                                                              |
+| Use Tor        | **OFF** — this is a local connection, Tor would route loopback traffic through circuits and fail |
+| Authentication | **Cookie File**                                                                         |
+| Cookie File    | `/live/persistence/TailsData_unlocked/Persistent/.bitcoin/.cookie`                     |
+
+Hit **Test Connection**. You should see "Connected" with a recent block height. Save and close Preferences — Sparrow will now use your local node for everything.
+
+Things that go wrong here, in roughly the order they're likely to:
+
+- **"Cannot write to a folder" near `.bitcoin`** — Sparrow does not need to write to `~/.bitcoin`; BoT deliberately makes parts of it read-only (the `wallets/` subdir is a symlink into `/media/$USER` chmod'd `-w` to keep your Bitcoin wallets out of Sparrow's reach). Make sure Sparrow's own wallet directory is `~/.sparrow/` (the default), not pointed at `~/.bitcoin/wallets/`. If you've messed with the default, reset it under Preferences → Storage.
+- **"Use Tor" being ON breaks the connection.** It must be OFF for BoT's local node. Your system-wide torification (Tails) still routes any *external* Sparrow traffic through Tor — toggling this off does not weaken your privacy posture against external services.
+- **"connection refused"** — your Bitcoin daemon isn't running. Launch Bitcoin from the Apps menu first, give it a few seconds to start, then test in Sparrow.
+- **"unauthorized"** — Sparrow can't read the cookie file. Check the path is exactly the persistent one above. If the cookie file doesn't exist, restart Bitcoin — it's regenerated on each launch.
+
+Ports BoT uses on the loopback interface: `17600` for `bitcoind` RPC, `17601` for `utxoracle-serve` (if running). Neither is reachable from outside the machine.
+
 ## Status
 
 BoT is currently **alpha**. The installer flow, release verification, and Persistent Storage integration are working. The control panel (`bot-menu`) ships a Status tab and About tab; Update / Uninstall actions are being wired up next. Expect rough edges, and please file issues.
