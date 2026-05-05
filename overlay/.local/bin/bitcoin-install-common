@@ -326,6 +326,30 @@ bot_dispatch_bitcoin() {
                 echo "$label is not installed. Run \`b\` to install it." >&2
                 exit 1
             fi
+            # Short-circuit: if we can resolve the latest upstream version
+            # cheaply and it matches the installed version, don't kick off
+            # the full download/verify/extract dance. Saves a slow Tor walk
+            # through SHA256SUMS, gpg refresh-keys, tarball, etc.
+            local resolver="${slug}_resolve_latest"
+            if declare -F "$resolver" >/dev/null 2>&1; then
+                local latest_now=""
+                if bot_latest_cache_fresh "$slug"; then
+                    latest_now="$(bot_latest_cache_read "$slug")"
+                else
+                    latest_now="$("$resolver" 2>/dev/null || true)"
+                    [ -n "$latest_now" ] && bot_latest_cache_write "$slug" "$latest_now"
+                fi
+                if [ -n "$latest_now" ] && [ "$installed_ver" = "$latest_now" ]; then
+                    bot_write_check_kv "$slug" "$latest_now" "ok"
+                    echo "$label: already up to date ($installed_ver)."
+                    if command -v zenity >/dev/null 2>&1; then
+                        zenity --info --title="$label is up to date" \
+                            --text="<b>$label is up to date.</b>\n\nInstalled: <tt>$installed_ver</tt>\nLatest published: <tt>$latest_now</tt>\n\nNothing to do." \
+                            --width=480 "$ICON" --icon=bitcoin128 2>/dev/null || true
+                    fi
+                    exit 0
+                fi
+            fi
             export BOT_AUTO_LATEST=1
             export BOT_AUTO_LATEST_PIN_MAJOR="${installed_ver%%.*}"
             return 1   # caller falls through to install flow
@@ -764,8 +788,30 @@ retry_on_fail wget -cxnH --cut-dirs=5 --timeout=60 --tries=10 \
 printf '\033]2;Getting %s trusted keys...\a' "$DIST_LABEL"
 if OLD_VER=$(bitcoind --version 2>/dev/null); then
     action=update
-    printf '\033]2;Updating all keys from keyserver...\a'
-    gpg --refresh-keys
+    # On update we previously ran `gpg --refresh-keys` against the entire
+    # keyring — that hits the keyserver for every key the user has ever
+    # imported, which on Tor is brutally slow (the user's report of "12
+    # keys refreshing for a minute each" is from this). Only refresh the
+    # fingerprints in builder-keys, which by construction are exactly the
+    # signers relevant to this dist.
+    printf '\033]2;Updating relevant signing keys...\a'
+    if [ -s builder-keys ]; then
+        # Extract just the fingerprint hex (handles both with-spaces and
+        # without-spaces formats we've used over the years).
+        mapfile -t _bk_fps < <(
+            grep -oE '([0-9A-Fa-f]{4} ?){10}|[0-9A-Fa-f]{40}' builder-keys \
+            | tr -d '[:space:]' | sort -u
+        )
+        if ((${#_bk_fps[@]} > 0)); then
+            timeout 60 gpg --refresh-keys "${_bk_fps[@]}" 2>/dev/null \
+                || echo "Note: refresh-keys timed out or failed; using local keyring as-is."
+        else
+            echo "Note: builder-keys empty or unparseable; skipping key refresh."
+        fi
+        unset _bk_fps
+    else
+        echo "Note: no builder-keys file; skipping key refresh."
+    fi
 else
     action=installation
     # For single-signer dists (Knots, Knots+BIP-110), the relevant key was

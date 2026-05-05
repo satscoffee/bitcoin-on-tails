@@ -47,7 +47,11 @@ readonly RELEASES_PAGE='https://github.com/dathonohm/bitcoin/releases'
 # network. Strips the leading "v" so the value is comparable with sort -V.
 knots_bip110_resolve_latest() {
     local body
-    body=$(curl -sL --fail --max-time 30 "$RELEASES_API" 2>/dev/null) || return 1
+    # 30s max-time bit users on slow Tor circuits; bump to 90 with two
+    # attempts. GitHub API is a small JSON payload — won't really take
+    # 90s but we want headroom for circuit setup latency.
+    body=$(curl -sL --fail --max-time 90 --retry 2 --retry-delay 5 \
+        "$RELEASES_API" 2>/dev/null) || return 1
     [ -n "$body" ] || return 1
     printf '%s' "$body" | python3 -c '
 import json, sys

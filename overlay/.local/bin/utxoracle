@@ -107,4 +107,13 @@ TMP_KV="$(mktemp "${LAST_KV}.XXXXXX")"
 } > "$TMP_KV"
 mv -f "$TMP_KV" "$LAST_KV"
 
+# Explicitly open the chart in Tor Browser via xdg-open. UTXOracle.py also
+# calls webbrowser.open() but that's been observed to silently no-op on
+# Tails 7.x (default browser handler changed). Calling xdg-open here
+# guarantees the chart actually appears for the user. xdg-open is
+# idempotent enough that a duplicate open just ends up as one tab.
+if [ -n "$LATEST_HTML" ] && [ -s "$LATEST_HTML" ]; then
+    xdg-open "file://$LATEST_HTML" >/dev/null 2>&1 &
+fi
+
 exit 0

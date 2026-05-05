@@ -408,7 +408,20 @@ build_bitcoin_tab() {
     if [ -n "$chg" ]; then
         cmd_changelog="xdg-open $(printf '%q' "$chg") >/dev/null 2>&1 &"
     else
-        cmd_changelog="zenity --info --title='No release notes' --text='No changelog URL on file. Click Check for updates first.' --ellipsize $ICON_ARG &"
+        # Fall back to the dist's general releases page when no specific
+        # changelog URL is cached yet — better UX than a "click Check first"
+        # dialog that tells the user to do something they might not want.
+        local fallback_releases=""
+        case "$dist" in
+            core)         fallback_releases="https://bitcoincore.org/en/releases/" ;;
+            knots)        fallback_releases="https://github.com/bitcoinknots/bitcoin/releases" ;;
+            knots-bip110) fallback_releases="https://github.com/dathonohm/bitcoin/releases" ;;
+        esac
+        if [ -n "$fallback_releases" ]; then
+            cmd_changelog="xdg-open $(printf '%q' "$fallback_releases") >/dev/null 2>&1 &"
+        else
+            cmd_changelog="zenity --info --title='No release notes' --text='No changelog URL available.' --ellipsize $ICON_ARG &"
+        fi
     fi
 
     # Surface active config on the tab so the user can see what they have
@@ -588,8 +601,10 @@ build_utxoracle_tab() {
             --ellipsize $ICON_ARG &"
     fi
     # Server controls — wrap in a terminal so users see start/stop output.
-    cmd_serve_start="$(mk_action  'BoT — start utxoracle-serve'  'utxoracle-serve start')"
-    cmd_serve_stop="$(mk_action   'BoT — stop utxoracle-serve'   'utxoracle-serve stop')"
+    # Append $refresh so the bot-menu re-renders with the new server status
+    # automatically once the start/stop action returns.
+    cmd_serve_start="$(mk_action  'BoT — start utxoracle-serve'  "utxoracle-serve start; $refresh")"
+    cmd_serve_stop="$(mk_action   'BoT — stop utxoracle-serve'   "utxoracle-serve stop; $refresh")"
     cmd_serve_status="$(mk_action 'BoT — utxoracle-serve status' 'utxoracle-serve status')"
 
     canonical="<b>UTXOracle</b> derives a Bitcoin price from <b>your own node's data only</b> — no third-party APIs, no IP leaks. Bundled snapshot from <tt>utxo.live</tt>; license preserved at <tt>$XDG_DATA_HOME/bot/utxoracle/LICENSE.txt</tt>.\n\n<b>Local HTTP price server (utxoracle-serve):</b> binds to <tt>127.0.0.1</tt> only, refreshes on each new confirmed block, exposes CoinGecko/Coinbase-shape endpoints + a native /price?date= for historical lookups. Accessible from Tor Browser on this Tails session only — external devices and other browsers (including Onion Browser on iOS) cannot reach 127.0.0.1 on this machine. From a terminal: <tt>btcprice</tt> for the latest price, <tt>btcprice 2024-04-15</tt> for a date."
@@ -723,17 +738,28 @@ main() {
 
     # Tab label "UTXOracle Price" — if it gets cut off in your install, swap to
     # "UTXOracle\nPrice" (yad accepts a literal newline in --tab labels).
+    #
+    # Refresh button (exit code 42) lets the user re-render the menu without
+    # closing it. Useful after starting/stopping utxoracle-serve, after
+    # checking for updates from a terminal, or any other state change.
     yad --notebook --key="$key" \
         --title="Bitcoin on Tails" \
         --tab="Status" --tab="Bitcoin" --tab="Sparrow" --tab="UTXOracle Price" \
         --tab="Tx Inspector" --tab="About" \
         --width=680 --height=560 \
+        --button="Refresh!gtk-refresh:42" \
         --button="gtk-close:0" \
         --image="$ICON_FILE" --image-on-top \
         "$ICON_ARG"
+    rc=$?
 
     # When the notebook closes, kill any leftover plug processes.
     pkill -P $$ -f "yad --plug=$key" 2>/dev/null || true
+
+    # Re-launch on Refresh.
+    if [ "$rc" = "42" ]; then
+        exec "$0" "$@"
+    fi
 }
 
 main "$@"
