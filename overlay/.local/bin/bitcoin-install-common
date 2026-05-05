@@ -759,18 +759,33 @@ if OLD_VER=$(bitcoind --version 2>/dev/null); then
     gpg --refresh-keys
 else
     action=installation
-    # Import any bundled trusted-keys whose fingerprint matches builder-keys
-    # (applies to Core's bundled keys; Knots has no bundled keys so this is a no-op)
-    for key in ./trusted-keys/*; do
-        [ -e "$key" ] || continue
-        if grep "$(gpg --show-keys "$key" | grep 'Key fingerprint')" builder-keys; then
-            gpg --import "$key"
-        else
-            echo "Warning: Bitcoin on Tails trusted key ${key/'./trusted-keys/'} did not sign $DIST_LABEL version $VER, skipping."
-        fi
-    done
-    # Download chain parameters in background to set prune
-    retry_on_fail wget --continue -O chainparams.cpp $BITCOIN_CHAINPARAMS_URL & get_size=$!
+    # For single-signer dists (Knots, Knots+BIP-110), the relevant key was
+    # already imported and stamped into builder-keys earlier in install-knots
+    # / install-knots-bip110. We don't iterate the bundled trusted-keys dir
+    # here because (a) only Core's multi-signer flow needs aggregation across
+    # bundled keys, and (b) the iteration produces a misleading wall of
+    # "trusted key X did not sign" warnings for keys that were never
+    # candidate signers for this dist anyway.
+    if [ -z "${SINGLE_SIGNER:-}" ]; then
+        # Multi-signer (Core): import any bundled trusted-keys whose
+        # fingerprint matches a builder-keys entry. Aggregation logic
+        # downstream relies on ≥3 of those validating SHA256SUMS.asc.
+        for key in ./trusted-keys/*; do
+            [ -e "$key" ] || continue
+            if grep "$(gpg --show-keys "$key" | grep 'Key fingerprint')" builder-keys; then
+                gpg --import "$key"
+            else
+                echo "Warning: Bitcoin on Tails trusted key ${key/'./trusted-keys/'} did not sign $DIST_LABEL version $VER, skipping."
+            fi
+        done
+    fi
+
+    # Download chain parameters in the background to drive prune-size
+    # suggestions. NOT critical for install — if the fetch hangs or fails
+    # we fall back to hardcoded constants downstream. timeout/tries cap so
+    # a stuck Tor circuit can't wedge the install.
+    retry_on_fail wget --continue --timeout=30 --tries=3 \
+        -O chainparams.cpp $BITCOIN_CHAINPARAMS_URL & get_size=$!
 fi
 
 printf '\033]2;Setup Persistent Storage...\a'
@@ -853,10 +868,25 @@ if [ -e $XDG_STATE_HOME/installed ] && [ -n "$OLD_VER" ]; then
     new_ver=$(bitcoind --version 2>/dev/null | head -1 | awk '{print $NF}')
     zenity --info --title='Update successful' --text="${OLD_VER%%Copyright*}was updated to $new_ver" "$ICON" --icon=bitcoin128 &
 else
-    # Bring chainparams.cpp download to foreground, set assumed chainstate & blockchain size, configure prune
-    ps -p $get_size &>/dev/null && fg %"$(jobs -l | grep $get_size | cut -f1 -d' ' | tr -c -d '[:digit:]')"
-    assumed_chain_state_size=$(grep --max-count=1 m_assumed_chain_state_size "$DOWNLOAD_DIR"/chainparams.cpp | sed 's/[^0-9]*//g')
-    assumed_blockchain_size=$(grep --max-count=1 m_assumed_blockchain_size "$DOWNLOAD_DIR"/chainparams.cpp | sed 's/[^0-9]*//g')
+    # Reap the background chainparams.cpp fetch. We use `wait` rather than
+    # `fg` so a killed/timed-out wget doesn't hang the install — fg would
+    # try to bring the (already-dead) job to the foreground.
+    wait "$get_size" 2>/dev/null || true
+
+    # Default fallback values if the chainparams fetch failed or hung.
+    # These are deliberately a touch conservative — slightly oversizing
+    # the chain estimate just makes the prune picker more cautious.
+    # Numbers tracked from Core master ~mid-2026; bump on major chain milestones.
+    assumed_blockchain_size=700        # GB
+    assumed_chain_state_size=10        # GB
+    if [ -s "$DOWNLOAD_DIR/chainparams.cpp" ]; then
+        cps_size=$(grep --max-count=1 m_assumed_chain_state_size "$DOWNLOAD_DIR/chainparams.cpp" 2>/dev/null | sed 's/[^0-9]*//g')
+        cps_blk=$( grep --max-count=1 m_assumed_blockchain_size  "$DOWNLOAD_DIR/chainparams.cpp" 2>/dev/null | sed 's/[^0-9]*//g')
+        [ -n "$cps_size" ] && assumed_chain_state_size="$cps_size"
+        [ -n "$cps_blk"  ] && assumed_blockchain_size="$cps_blk"
+    else
+        echo "Warning: chainparams.cpp fetch failed or timed out; using fallback values (chain ~${assumed_blockchain_size} GB / chainstate ~${assumed_chain_state_size} GB) for prune sizing." >&2
+    fi
     # Move completed verified download to persistent storage
     rsync -vh --remove-source-files --recursive "$DOWNLOAD_DIR" $XDG_DATA_HOME
     mkdir -p $DATA_DIR/{wallets,blocks} # TODO: this can be replaced by creating the symlink in panic mode solution

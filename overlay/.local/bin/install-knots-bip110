@@ -207,7 +207,7 @@ if [ "${BOT_AUTO_LATEST:-0}" != "1" ]; then
     if ! zenity --question \
         --title="Confirm Bitcoin Knots + BIP-110 install" \
         --text="<b>Bitcoin Knots + BIP-110 $VER</b>\n\nSigned by <tt>dathonohm</tt> (single signature required).\nKey source: $KEY_SOURCE_DISPLAY\nMatched short ID: <tt>0x$BIP110_PINNED_SHORTID</tt>\nFull fingerprint(s):\n$fp_display\n\n<b>BIP-110 is a soft-fork proposal</b> that re-imposes data limits on Bitcoin transactions (non-OP_RETURN outputs ≤ 34 bytes, OP_RETURN ≤ 83 bytes). Running this build means your node enforces and signals support for those rules.\n\nThis is a non-mainline build. If BIP-110 activates differently than your node enforces, you could end up on a chain split. Read up on the proposal at <a href=\"https://bip110.org\">bip110.org</a> first if you haven't.\n\nProceed?" \
-        --ok-label="Install" --cancel-label="Cancel" --width=600 \
+        --ok-label="Install" --cancel-label="Cancel" --width=720 --height=520 \
         "$ICON" --icon=bitcoin128; then
         exit 1
     fi
