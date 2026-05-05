@@ -1,0 +1,655 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
+###############################################################################
+# bot-tx-inspector — interactive transaction cost-basis tracker (v0.10)
+#
+# Walks a chain of Bitcoin transactions, computing fees and USD cost-basis at
+# each step using the local utxoracle-serve daemon for pricing.  Outputs a
+# JSON session file that bot-tx-report renders to HTML + CSV.
+#
+# Requires:
+#   • bitcoind running with txindex=1
+#   • utxoracle-serve running on 127.0.0.1:17601 (or $UTXORACLE_SERVE_PORT)
+#   • python3 (on Tails by default)
+#   • zenity (on Tails by default)
+#
+# Usage:
+#   bot-tx-inspector               Start a new session
+#   bot-tx-inspector --resume      Resume the most recent session
+#   bot-tx-inspector SESSION.json  Resume a specific saved session
+###############################################################################
+
+set -u
+
+export WAYLAND_DISPLAY=""
+DATA_DIR="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bitcoin}"
+DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
+XDG_DATA_HOME="${XDG_DATA_HOME:-$DOTFILES/.local/share}"
+XDG_STATE_HOME="${XDG_STATE_HOME:-$DOTFILES/.local/state}"
+SERVE_PORT="${UTXORACLE_SERVE_PORT:-17601}"
+SERVE_URL="http://127.0.0.1:$SERVE_PORT"
+SESSION_DIR="$XDG_DATA_HOME/bot/tx-inspector/sessions"
+ICON="$XDG_DATA_HOME/icons/bot128.png"
+ICON_ARG="--image=$ICON"
+
+###############################################################################
+# Helpers
+###############################################################################
+
+die() { echo "bot-tx-inspector: $*" >&2; exit 1; }
+
+# bitcoin-cli wrapper — always passes -datadir so the cookie file is found
+# without requiring a running login shell or sourced profile.
+bcli() { bitcoin-cli -datadir="$DATA_DIR" "$@"; }
+
+# Fetch a price for YYYY-MM-DD from utxoracle-serve.  Returns empty string on
+# failure (no price history for that date yet, or daemon not running).
+price_for_date() {
+    local date="$1"
+    curl -fsS --max-time 5 "$SERVE_URL/price?date=$date" 2>/dev/null \
+        | python3 -c "import json,sys; d=json.load(sys.stdin); print(int(d.get('price_usd',0)))" \
+        2>/dev/null || echo ""
+}
+
+# Fetch the latest block-window price.
+price_latest() {
+    curl -fsS --max-time 5 "$SERVE_URL/price" 2>/dev/null \
+        | python3 -c "import json,sys; d=json.load(sys.stdin); print(int(d.get('price_usd',0)))" \
+        2>/dev/null || echo ""
+}
+
+# Prompt with zenity, returning exit code from zenity (1 = cancel/close).
+z_entry()    { zenity --entry    "$@" --width=600 --icon="$ICON" 2>/dev/null; }
+z_question() { zenity --question "$@" --width=560 --icon="$ICON" 2>/dev/null; }
+z_info()     { zenity --info     "$@" --width=640 --icon="$ICON" 2>/dev/null; }
+z_error()    { zenity --error    "$@" --width=560 --icon="$ICON" 2>/dev/null; }
+z_list()     { zenity --list     "$@" --width=720 --height=480 --icon="$ICON" 2>/dev/null; }
+
+###############################################################################
+# Pre-flight checks
+###############################################################################
+
+preflight() {
+    # bitcoin-cli available?
+    command -v bitcoin-cli >/dev/null 2>&1 \
+        || die "bitcoin-cli not on PATH. Install Bitcoin via \`b\` first."
+
+    # Daemon responding?
+    if ! bcli getblockcount >/dev/null 2>&1; then
+        z_error --title="Bitcoin not running" \
+            --text="<b>bitcoind is not responding.</b>\n\nStart Bitcoin from the BoT menu or terminal first, wait for it to finish loading, then retry."
+        exit 1
+    fi
+
+    # txindex enabled?
+    local idx_info
+    idx_info=$(bcli getindexinfo 2>/dev/null || echo "{}")
+    if ! echo "$idx_info" | python3 -c \
+        "import json,sys; d=json.load(sys.stdin); exit(0 if 'txindex' in d else 1)" 2>/dev/null; then
+        txindex_prompt
+    fi
+
+    # utxoracle-serve running?
+    if ! curl -fsS --max-time 3 "$SERVE_URL/healthz" >/dev/null 2>&1; then
+        z_question --title="utxoracle-serve not running" \
+            --text="The local price server (<tt>utxoracle-serve</tt>) is not running.\n\n<b>Start it now?</b>  Without it, USD values will show as '—' for all steps.\n\nYou can still inspect the transaction chain — prices can be looked up later." \
+            && utxoracle-serve start &
+    fi
+}
+
+# Offer to enable txindex (requires reindex — warn the user).
+txindex_prompt() {
+    # Check if the user has already declined.
+    local settings_json="$DATA_DIR/settings.json"
+    if python3 -c \
+        "import json; d=json.load(open('$settings_json')); exit(0 if d.get('txindex_declined') else 1)" \
+        2>/dev/null; then
+        # Previously declined — offer again with a note.
+        if ! z_question --title="Transaction Inspector — txindex required" \
+            --text="<b>The Transaction Inspector requires a transaction index (<tt>txindex=1</tt>).</b>\n\nYou previously chose not to enable it.\n\n<b>Enable txindex now?</b>\n\n  • Adds ~40–50 GB extra disk space (and grows with the chain).\n  • Requires a one-time multi-hour reindex — Bitcoin will be unavailable during this.\n  • The decision is saved so you won't be asked again unless you change it.\n\n<b>Skip:</b> Inspector is unavailable until txindex is enabled." \
+            --ok-label="Enable txindex" --cancel-label="Skip"; then
+            exit 0
+        fi
+    else
+        if ! z_question --title="Transaction Inspector — txindex required" \
+            --text="<b>The Transaction Inspector requires a transaction index (<tt>txindex=1</tt>).</b>\n\nThis lets Bitcoin look up any transaction by its ID — necessary for tracing input values across the chain.\n\n<b>Enable txindex now?</b>\n\n  • Adds ~40–50 GB extra disk space (and grows with the chain).\n  • Requires a one-time multi-hour reindex — Bitcoin will be unavailable during this.\n  • The decision is saved so you won't be asked again unless you change it.\n\n<b>Skip:</b> Inspector is unavailable until txindex is enabled." \
+            --ok-label="Enable txindex" --cancel-label="Skip (not now)"; then
+            # Save decline flag.
+            python3 - "$settings_json" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+d["txindex_declined"] = True
+with open(path, "w") as f:
+    json.dump(d, f, indent=4)
+PY
+            z_info --title="Inspector unavailable" \
+                --text="Transaction Inspector is unavailable until txindex is enabled.\n\nYou can enable it later from the Inspector tab in the BoT menu."
+            exit 0
+        fi
+    fi
+
+    # User agreed — patch settings.json and restart.
+    python3 - "$settings_json" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        d = json.load(f)
+except Exception:
+    d = {}
+d["txindex"] = "1"
+d.pop("txindex_declined", None)
+with open(path, "w") as f:
+    json.dump(d, f, indent=4)
+print("settings.json updated: txindex=1")
+PY
+
+    z_info --title="txindex enabled — reindex required" \
+        --text="<b>txindex=1 has been added to your Bitcoin settings.</b>\n\nBitcoin will now restart and reindex the chain.  This is a <b>one-time operation</b> that takes several hours on a USB stick.\n\nYou can continue using Tails normally — Bitcoin syncs in the background.\n\nThe Inspector will be available once reindexing completes."
+
+    # Restart bitcoind so it picks up txindex=1 and starts reindexing.
+    stop-btc 2>/dev/null || true
+    sleep 2
+    wrapped bitcoind -reindex -daemon 2>/dev/null || \
+        wrapped bitcoin-qt -reindex -min 2>/dev/null &
+    exit 0
+}
+
+###############################################################################
+# Transaction fetch + parse
+###############################################################################
+
+# Fetch a raw transaction (verbose) from the node.
+# Prints JSON to stdout; returns non-zero on failure.
+fetch_tx() {
+    local txid="$1"
+    bcli getrawtransaction "$txid" true 2>/dev/null
+}
+
+# Given a txid and vout index, fetch the value in BTC from that output.
+# Requires txindex for arbitrary historical txs.
+fetch_input_value() {
+    local txid="$1" vout="$2"
+    bcli getrawtransaction "$txid" true 2>/dev/null \
+        | python3 -c "
+import json, sys
+tx = json.load(sys.stdin)
+for o in tx.get('vout', []):
+    if o['n'] == $vout:
+        print('{:.8f}'.format(o['value']))
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null
+}
+
+###############################################################################
+# Session management
+###############################################################################
+
+# Initialise a new empty session JSON, print path.
+new_session() {
+    mkdir -p "$SESSION_DIR"
+    local ts; ts=$(date -u +%Y%m%dT%H%M%SZ)
+    local path="$SESSION_DIR/session-$ts.json"
+    python3 - "$path" <<'PY'
+import json, sys, datetime
+path = sys.argv[1]
+data = {
+    "version": 1,
+    "created": datetime.datetime.utcnow().isoformat() + "Z",
+    "steps": [],
+    "summary": {}
+}
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+print(path)
+PY
+}
+
+# Append a completed step dict to the session file.
+append_step() {
+    local session_file="$1" step_json="$2"
+    python3 - "$session_file" "$step_json" <<'PY'
+import json, sys
+path, step_str = sys.argv[1], sys.argv[2]
+step = json.loads(step_str)
+with open(path) as f:
+    data = json.load(f)
+data["steps"].append(step)
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+}
+
+# Recompute and write the summary block.
+update_summary() {
+    local session_file="$1"
+    python3 - "$session_file" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+steps = data["steps"]
+total_fee_btc   = sum(s.get("fee_btc", 0)          for s in steps)
+total_fee_usd   = sum(s.get("fee_usd", 0)           for s in steps if s.get("fee_usd") is not None)
+total_sent_btc  = sum(s.get("value_sent_btc", 0)    for s in steps if not s.get("is_self_transfer"))
+total_sent_usd  = sum(s.get("value_sent_usd", 0)    for s in steps if not s.get("is_self_transfer") and s.get("value_sent_usd") is not None)
+# Cost basis = value of the first input in step 0
+first = steps[0] if steps else {}
+cost_basis_btc  = first.get("total_input_btc", 0)
+cost_basis_usd  = first.get("total_input_usd", None)
+data["summary"] = {
+    "total_fee_btc":  round(total_fee_btc, 8),
+    "total_fee_usd":  round(total_fee_usd, 2) if total_fee_usd else None,
+    "total_sent_btc": round(total_sent_btc, 8),
+    "total_sent_usd": round(total_sent_usd, 2) if total_sent_usd else None,
+    "cost_basis_btc": round(cost_basis_btc, 8),
+    "cost_basis_usd": cost_basis_usd,
+    "step_count":     len(steps),
+}
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+}
+
+###############################################################################
+# Interactive step: process one transaction
+###############################################################################
+
+process_tx() {
+    local session_file="$1" txid="$2"
+
+    echo ""
+    echo "Fetching transaction $txid …"
+
+    local tx_json
+    tx_json=$(fetch_tx "$txid") || {
+        z_error --title="Transaction not found" \
+            --text="<b>Could not fetch transaction:</b>\n<tt>$txid</tt>\n\nCheck the txid and make sure:\n  • txindex=1 is enabled and reindexing is complete\n  • Bitcoin is fully synced\n  • This transaction is confirmed (not just in the mempool)"
+        return 1
+    }
+
+    # Parse tx fields via python.  Write tx_json to a temp file so the Python
+    # heredoc never needs to embed raw JSON inside bash string interpolation
+    # (avoids quoting/backslash breakage on adversarial transaction data).
+    local tx_tmp parsed
+    tx_tmp="/tmp/bot-tx-$$.json"
+    printf '%s' "$tx_json" > "$tx_tmp"
+    parsed=$(python3 - "$txid" "$tx_tmp" <<'PY'
+import json, sys, datetime
+
+txid    = sys.argv[1]
+tx_path = sys.argv[2]
+with open(tx_path) as f:
+    tx = json.load(f)
+
+block_height = tx.get("blockheight") or tx.get("height", 0)
+block_time   = tx.get("blocktime", 0)
+block_date   = datetime.datetime.utcfromtimestamp(block_time).strftime("%Y-%m-%d") if block_time else ""
+
+vins  = tx.get("vin",  [])
+vouts = tx.get("vout", [])
+
+result = {
+    "txid":         txid,
+    "block_height": block_height,
+    "block_time":   block_time,
+    "block_date":   block_date,
+    "vins":         vins,
+    "vouts":        vouts,
+    "is_coinbase":  any("coinbase" in v for v in vins),
+}
+print(json.dumps(result))
+PY
+)
+    rm -f "$tx_tmp"
+
+    local block_height block_time block_date is_coinbase vout_count vin_count
+    block_height=$(echo "$parsed" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['block_height'])")
+    block_time=$(echo "$parsed"   | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['block_time'])")
+    block_date=$(echo "$parsed"   | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['block_date'])")
+    is_coinbase=$(echo "$parsed"  | python3 -c "import json,sys; d=json.load(sys.stdin); print('1' if d['is_coinbase'] else '0')")
+    vout_count=$(echo "$parsed"   | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['vouts']))")
+    vin_count=$(echo "$parsed"    | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['vins']))")
+
+    # Fetch input values (need txindex for each prev tx).
+    echo "Fetching input values (${vin_count} input(s)) …"
+    local total_input_btc=0
+    local inputs_detail=""
+    if [ "$is_coinbase" = "1" ]; then
+        inputs_detail="  [coinbase — newly minted BTC]"
+        total_input_btc=0
+    else
+        local i=0
+        while IFS= read -r vin_json; do
+            local prev_txid prev_vout in_val
+            prev_txid=$(echo "$vin_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('txid',''))")
+            prev_vout=$(echo "$vin_json"  | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('vout',0))")
+            [ -z "$prev_txid" ] && continue
+            in_val=$(fetch_input_value "$prev_txid" "$prev_vout" || echo "")
+            if [ -n "$in_val" ]; then
+                total_input_btc=$(python3 -c "print('{:.8f}'.format($total_input_btc + $in_val))")
+                inputs_detail+="  Input $i: $in_val BTC  (${prev_txid:0:16}…:$prev_vout)\n"
+            else
+                inputs_detail+="  Input $i: (value unavailable) ${prev_txid:0:16}…:$prev_vout\n"
+            fi
+            i=$(( i + 1 ))
+        done < <(echo "$parsed" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for v in d['vins']:
+    print(json.dumps(v))
+")
+    fi
+
+    # Parse outputs.
+    local outputs_detail="" total_output_btc=0
+    local out_lines=()
+    while IFS= read -r vout_json; do
+        local n val addr
+        n=$(echo "$vout_json"    | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['n'])")
+        val=$(echo "$vout_json"  | python3 -c "import json,sys; d=json.load(sys.stdin); print('{:.8f}'.format(d['value']))")
+        addr=$(echo "$vout_json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+spk=d.get('scriptPubKey',{})
+addrs=spk.get('address','') or ','.join(spk.get('addresses',[]))
+print(addrs or '(non-standard)')
+")
+        total_output_btc=$(python3 -c "print('{:.8f}'.format($total_output_btc + $val))")
+        outputs_detail+="  Output $n: $val BTC  $addr\n"
+        out_lines+=("$n" "$val BTC — $addr")
+    done < <(echo "$parsed" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for v in d['vouts']:
+    print(json.dumps(v))
+")
+
+    # Fee.
+    local fee_btc fee_btc_display
+    if [ "$is_coinbase" = "1" ]; then
+        fee_btc=0
+        fee_btc_display="0.00000000"
+    else
+        fee_btc=$(python3 -c "
+v = $total_input_btc - $total_output_btc
+print('{:.8f}'.format(max(v, 0)))
+")
+        fee_btc_display="$fee_btc"
+    fi
+
+    # USD price.
+    local btc_price_usd fee_usd total_input_usd total_output_usd
+    btc_price_usd=""
+    fee_usd=""
+    total_input_usd=""
+    total_output_usd=""
+    if [ -n "$block_date" ]; then
+        echo "Looking up price for $block_date …"
+        btc_price_usd=$(price_for_date "$block_date")
+        if [ -n "$btc_price_usd" ] && (( btc_price_usd > 0 )); then
+            fee_usd=$(python3 -c "print('{:.2f}'.format($fee_btc * $btc_price_usd))")
+            total_input_usd=$(python3 -c "print('{:.2f}'.format($total_input_btc * $btc_price_usd))")
+            total_output_usd=$(python3 -c "print('{:.2f}'.format($total_output_btc * $btc_price_usd))")
+        else
+            btc_price_usd=""
+        fi
+    fi
+
+    local price_line
+    if [ -n "$btc_price_usd" ]; then
+        price_line="BTC price ($block_date): \$${btc_price_usd}  |  Fee: $fee_btc_display BTC (\$${fee_usd})"
+    else
+        price_line="BTC price ($block_date): — (utxoracle-serve not running or no data for this date)"
+    fi
+
+    # Show summary dialog.
+    local summary_text
+    # Step number for the dialog title — count existing steps + 1.
+    local step_num
+    step_num=$(python3 -c "
+import json
+try:
+    d = json.load(open('$session_file'))
+    print(len(d.get('steps', [])) + 1)
+except Exception:
+    print('?')
+")
+
+    summary_text="<b>Transaction</b>
+<tt>${txid:0:32}…</tt>
+
+<b>Block:</b> ${block_height} ($block_date)
+
+<b>Inputs</b>  ($vin_count total, ${total_input_btc} BTC${total_input_usd:+  /  \$$total_input_usd})
+$(echo -e "$inputs_detail")
+<b>Outputs</b>  ($vout_count total, ${total_output_btc} BTC${total_output_usd:+  /  \$$total_output_usd})
+$(echo -e "$outputs_detail")
+<b>Fee:</b> ${fee_btc_display} BTC${fee_usd:+  (\$$fee_usd)}
+<b>${price_line}</b>"
+
+    if ! z_question --title="Transaction Inspector — step ${step_num}" \
+        --text="$summary_text" \
+        --ok-label="Continue →" --cancel-label="Discard step"; then
+        echo "Step discarded."
+        return 1
+    fi
+
+    # Ask: is the whole tx a self-transfer?
+    local is_self_transfer=false
+    if z_question --title="Self-transfer?" \
+        --text="Is this transaction a <b>self-transfer</b> (all outputs go to your own wallets — e.g. consolidation, change-only round-trip)?\n\nSelf-transfers are excluded from the 'value sent' total." \
+        --ok-label="Yes — self-transfer" --cancel-label="No — sends to someone else"; then
+        is_self_transfer=true
+    fi
+
+    # Ask which output to follow (or enter a new txid manually, or finish).
+    local next_txid="" followed_output=-1
+    local follow_choice
+    follow_choice=$(z_list \
+        --title="Transaction Inspector — follow which output?" \
+        --text="<b>Which output do you want to follow next?</b>\n\nPick an output to follow it to its next transaction, enter a txid manually, or finish the session." \
+        --column="Output" --column="Details" \
+        "${out_lines[@]}" \
+        --extra-button="Enter txid manually" \
+        --extra-button="Finish session" \
+        --print-column=1) || follow_choice="__cancel__"
+
+    case "$follow_choice" in
+        __cancel__|"")
+            # User closed the dialog — treat as finish.
+            follow_choice="Finish session"
+            ;;
+    esac
+
+    if [ "$follow_choice" = "Finish session" ]; then
+        next_txid=""
+    elif [ "$follow_choice" = "Enter txid manually" ]; then
+        next_txid=$(z_entry --title="Next transaction ID" \
+            --text="Paste the next transaction ID (txid) to continue tracing:" \
+            --entry-text="") || next_txid=""
+        next_txid=$(echo "$next_txid" | tr -d '[:space:]')
+    else
+        # A numeric output index was returned.
+        followed_output="$follow_choice"
+        # Look up txid of the tx that spent this output — requires a node
+        # with txindex but NOT gettxout (that's for unspent; we need spent).
+        # We can't follow spending txs without scantxoutset or an index; ask
+        # the user to paste the spending txid instead.
+        next_txid=$(z_entry --title="Follow output $followed_output" \
+            --text="You chose to follow <b>output $followed_output</b>.\n\nPaste the txid of the transaction that <b>spent this output</b>:\n<i>(Use a block explorer or <tt>bitcoin-cli gettxout $txid $followed_output</tt> to confirm it's unspent, or your wallet to find the spending tx.)</i>" \
+            --entry-text="") || next_txid=""
+        next_txid=$(echo "$next_txid" | tr -d '[:space:]')
+    fi
+
+    # Build the value_sent figure.
+    local value_sent_btc value_sent_usd
+    value_sent_btc="$total_output_btc"
+    value_sent_usd="$total_output_usd"
+    if [ "$is_self_transfer" = "true" ]; then
+        value_sent_btc=0
+        value_sent_usd=0
+    fi
+
+    # Build step JSON.  Use extracted scalar bash vars — no $parsed subshells
+    # needed here, keeping the heredoc simple and quote-safe.
+    local step_json
+    step_json=$(python3 - <<PY
+import json
+
+step = {
+    "txid":              "$txid",
+    "block_height":      ${block_height:-0},
+    "block_time":        ${block_time:-0},
+    "block_date":        "$block_date",
+    "is_coinbase":       $( [ "$is_coinbase" = "1" ] && echo true || echo false ),
+    "is_self_transfer":  $is_self_transfer,
+    "vin_count":         $vin_count,
+    "vout_count":        $vout_count,
+    "total_input_btc":   float("${total_input_btc:-0}"),
+    "total_output_btc":  float("${total_output_btc:-0}"),
+    "fee_btc":           float("${fee_btc:-0}"),
+    "btc_price_usd":     ${btc_price_usd:-null},
+    "fee_usd":           ${fee_usd:-null},
+    "total_input_usd":   ${total_input_usd:-null},
+    "total_output_usd":  ${total_output_usd:-null},
+    "value_sent_btc":    float("${value_sent_btc:-0}"),
+    "value_sent_usd":    ${value_sent_usd:-null},
+    "followed_output":   $followed_output,
+    "next_txid":         $([ -n "$next_txid" ] && echo '"'"$next_txid"'"' || echo null),
+}
+print(json.dumps(step))
+PY
+)
+
+    append_step "$session_file" "$step_json"
+    update_summary "$session_file"
+
+    echo "Step saved. Session: $session_file"
+
+    # Return next txid via a temp file (subshell can't write to caller's vars).
+    printf '%s' "$next_txid" > /tmp/bot-tx-inspector-next-txid.$$
+}
+
+###############################################################################
+# Main loop
+###############################################################################
+
+main() {
+    local session_file="" resume_txid=""
+
+    case "${1:-}" in
+        --resume)
+            # Resume the most recent session.
+            session_file=$(ls -t "$SESSION_DIR"/session-*.json 2>/dev/null | head -1)
+            if [ -z "$session_file" ]; then
+                z_error --title="No sessions found" \
+                    --text="No previous sessions found in <tt>$SESSION_DIR</tt>.\n\nStarting a new session instead."
+                session_file=$(new_session)
+            else
+                echo "Resuming session: $session_file"
+            fi
+            ;;
+        *.json)
+            session_file="$1"
+            [ -f "$session_file" ] || die "Session file not found: $session_file"
+            ;;
+        "")
+            session_file=$(new_session)
+            ;;
+        *)
+            echo "Usage: bot-tx-inspector [--resume | SESSION.json]" >&2
+            exit 1
+            ;;
+    esac
+
+    preflight
+
+    echo ""
+    echo "══════════════════════════════════════════════════════"
+    echo "  Bitcoin on Tails — Transaction Inspector"
+    echo "══════════════════════════════════════════════════════"
+    echo "  Session: $session_file"
+    echo ""
+
+    # Get the starting txid.
+    local current_txid
+    current_txid=$(z_entry \
+        --title="Transaction Inspector — start" \
+        --text="<b>Paste the starting transaction ID (txid):</b>\n\nYou can find this in your wallet (Sparrow, etc.) or a block explorer.\nThe Inspector will walk forward from this transaction." \
+        --entry-text="") || exit 0
+    current_txid=$(echo "$current_txid" | tr -d '[:space:]')
+    [ -z "$current_txid" ] && exit 0
+
+    # Optionally record the user's own addresses / label (for future annotation).
+    local own_label
+    own_label=$(z_entry \
+        --title="Transaction Inspector — your addresses (optional)" \
+        --text="<b>Optional:</b> enter a label or your own Bitcoin address(es) to help annotate outputs.\n\nThis is stored locally in the session file only — not sent anywhere.\nLeave blank to skip." \
+        --entry-text="") || own_label=""
+
+    # Append metadata.
+    python3 - "$session_file" "$own_label" <<'PY'
+import json, sys
+path, label = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    d = json.load(f)
+if label:
+    d["own_label"] = label
+with open(path, "w") as f:
+    json.dump(d, f, indent=2)
+PY
+
+    # Main walk loop.
+    local step=0
+    while [ -n "$current_txid" ]; do
+        step=$(( step + 1 ))
+        echo ""
+        echo "── Step $step ──────────────────────────────────────────────"
+        echo "  txid: $current_txid"
+
+        rm -f /tmp/bot-tx-inspector-next-txid.$$
+        if ! process_tx "$session_file" "$current_txid"; then
+            # User discarded the step — ask what to do.
+            if z_question --title="Step discarded" \
+                --text="The step was discarded.\n\n<b>Continue with a different txid?</b>" \
+                --ok-label="Yes — enter txid" --cancel-label="No — finish session"; then
+                current_txid=$(z_entry \
+                    --title="Transaction Inspector" \
+                    --text="Paste the next txid to continue:" \
+                    --entry-text="") || current_txid=""
+                current_txid=$(echo "$current_txid" | tr -d '[:space:]')
+            else
+                current_txid=""
+            fi
+            continue
+        fi
+
+        current_txid=$(cat /tmp/bot-tx-inspector-next-txid.$$ 2>/dev/null || echo "")
+        rm -f /tmp/bot-tx-inspector-next-txid.$$
+    done
+
+    echo ""
+    echo "Session complete. Generating report …"
+    update_summary "$session_file"
+
+    # Show a brief summary before opening the report.
+    local step_count total_fee_btc total_fee_usd
+    step_count=$(python3  -c "import json; d=json.load(open('$session_file')); print(d['summary'].get('step_count',0))")
+    total_fee_btc=$(python3 -c "import json; d=json.load(open('$session_file')); print(d['summary'].get('total_fee_btc',0))")
+    total_fee_usd=$(python3 -c "import json; d=json.load(open('$session_file')); s=d['summary'].get('total_fee_usd'); print('\$'+str(s) if s else '—')")
+
+    z_info --title="Session complete" \
+        --text="<b>$step_count transaction(s) traced.</b>\n\nTotal fees: ${total_fee_btc} BTC  ($total_fee_usd)\n\nOpening the cost-basis report in Tor Browser …\n\n<i>Session saved to:</i>\n<tt>$session_file</tt>"
+
+    bot-tx-report "$session_file"
+}
+
+main "$@"

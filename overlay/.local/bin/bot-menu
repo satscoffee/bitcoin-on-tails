@@ -611,10 +611,81 @@ Public key: <a href='$GPG_KEY_URL'>$GPG_KEY_URL</a>
 
 Cross-check the fingerprint against an independent source before importing."
 
-    yad --plug="$key" --tabnum=5 \
+    yad --plug="$key" --tabnum=6 \
         --form --columns=1 \
         --text="$body" \
         --text-align=left &
+}
+
+###############################################################################
+# Tx Inspector tab (v0.10) — cost-basis tracker
+#
+# Requires txindex=1.  If not enabled, the tab surfaces an enable button and
+# explains the one-time reindex cost.  Once enabled, shows session history and
+# a "Start new session" button.
+###############################################################################
+build_inspector_tab() {
+    local key=$1
+    local dist; dist="$(active_dist)"
+    local session_dir="$XDG_DATA_HOME/bot/tx-inspector/sessions"
+
+    # Not installed — can't use RPC at all.
+    if [ -z "$dist" ]; then
+        yad --plug="$key" --tabnum=5 \
+            --form --columns=1 \
+            --field="<b>Tx Inspector</b>:LBL" "" \
+            --field=":LBL" "The Transaction Inspector requires a running Bitcoin node.\n\nInstall Bitcoin from the Bitcoin tab first." &
+        return
+    fi
+
+    # Check txindex status (non-blocking — don't block the tab if bitcoind is slow).
+    local txindex_ok=0
+    if bcli_result=$(bitcoin-cli -datadir="$DATA_DIR" getindexinfo 2>/dev/null); then
+        echo "$bcli_result" | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); exit(0 if 'txindex' in d else 1)" 2>/dev/null \
+            && txindex_ok=1
+    fi
+
+    # Most-recent session summary (if any).
+    local last_session="" last_session_label="(none yet)"
+    last_session=$(ls -t "$session_dir"/session-*.json 2>/dev/null | head -1 || true)
+    if [ -n "$last_session" ]; then
+        local step_count created
+        step_count=$(python3 -c \
+            "import json; d=json.load(open('$last_session')); print(d.get('summary',{}).get('step_count',0))" \
+            2>/dev/null || echo "?")
+        created=$(python3 -c \
+            "import json; d=json.load(open('$last_session')); print(d.get('created','')[:10])" \
+            2>/dev/null || echo "")
+        last_session_label="${created} — ${step_count} transaction(s)"
+    fi
+
+    local cmd_new cmd_resume cmd_report cmd_enable_txindex
+    cmd_new="$(mk_action 'BoT — Transaction Inspector' 'bot-tx-inspector')"
+    cmd_resume="$(mk_action 'BoT — Transaction Inspector (resume)' 'bot-tx-inspector --resume')"
+    cmd_report="$(mk_action 'BoT — Tx Inspector report' "bot-tx-report")"
+    cmd_enable_txindex="$(mk_action 'BoT — enable txindex' 'bot-tx-inspector')"  # inspector handles the prompt
+
+    if (( txindex_ok )); then
+        yad --plug="$key" --tabnum=5 \
+            --form --columns=1 \
+            --field="<b>Transaction Inspector</b>:LBL" "" \
+            --field=":LBL" "Trace a chain of Bitcoin transactions and compute cost-basis, fees, and USD value at each step — using your local node and UTXOracle price data only. No external APIs." \
+            --field="txindex status:RO" "Enabled ✓" \
+            --field="<b>Sessions</b>:LBL" "" \
+            --field="Most recent session:RO" "$last_session_label" \
+            --field="Start new session:FBTN"    "$cmd_new" \
+            --field="Resume last session:FBTN"  "$cmd_resume" \
+            --field="Open last report:FBTN"     "$cmd_report" &
+    else
+        yad --plug="$key" --tabnum=5 \
+            --form --columns=1 \
+            --field="<b>Transaction Inspector</b>:LBL" "" \
+            --field=":LBL" "Trace a chain of Bitcoin transactions and compute cost-basis, fees, and USD value at each step — using your local node and UTXOracle price data only." \
+            --field="txindex status:RO" "Not enabled" \
+            --field=":LBL" "<b>txindex=1 is required</b> to look up any transaction by ID.\n\n  • Adds ~40–50 GB extra disk (grows with the chain)\n  • One-time multi-hour reindex — Bitcoin runs in the background\n  • Click below to enable and restart Bitcoin automatically" \
+            --field="Enable txindex &amp; reindex:FBTN" "$cmd_enable_txindex" &
+    fi
 }
 
 ###############################################################################
@@ -627,14 +698,16 @@ main() {
     build_bitcoin_tab "$key"
     build_sparrow_tab "$key"
     build_utxoracle_tab "$key"
+    build_inspector_tab "$key"
     build_about_tab "$key"
 
     # Tab label "UTXOracle Price" — if it gets cut off in your install, swap to
     # "UTXOracle\nPrice" (yad accepts a literal newline in --tab labels).
     yad --notebook --key="$key" \
         --title="Bitcoin on Tails" \
-        --tab="Status" --tab="Bitcoin" --tab="Sparrow" --tab="UTXOracle Price" --tab="About" \
-        --width=620 --height=540 \
+        --tab="Status" --tab="Bitcoin" --tab="Sparrow" --tab="UTXOracle Price" \
+        --tab="Tx Inspector" --tab="About" \
+        --width=680 --height=560 \
         --button="gtk-close:0" \
         --image="$ICON_FILE" --image-on-top \
         "$ICON_ARG"

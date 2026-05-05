@@ -1,0 +1,465 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
+###############################################################################
+# bot-tx-report — render a bot-tx-inspector session to HTML + open in browser
+#
+# Usage:
+#   bot-tx-report SESSION.json
+#   bot-tx-report              (uses the most recent session)
+#
+# Output: a self-contained HTML file alongside the session JSON.
+# Opened in Tor Browser (or xdg-open as fallback).
+###############################################################################
+
+set -u
+
+DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
+XDG_DATA_HOME="${XDG_DATA_HOME:-$DOTFILES/.local/share}"
+SESSION_DIR="$XDG_DATA_HOME/bot/tx-inspector/sessions"
+
+die() { echo "bot-tx-report: $*" >&2; exit 1; }
+
+# Resolve session file.
+session_file="${1:-}"
+if [ -z "$session_file" ]; then
+    session_file=$(ls -t "$SESSION_DIR"/session-*.json 2>/dev/null | head -1)
+    [ -n "$session_file" ] || die "No session files found in $SESSION_DIR"
+fi
+[ -f "$session_file" ] || die "Session file not found: $session_file"
+
+# Derive HTML output path alongside the JSON.
+html_file="${session_file%.json}.html"
+
+echo "bot-tx-report: rendering $session_file → $html_file"
+
+###############################################################################
+# Python renders the HTML from the session JSON.
+###############################################################################
+python3 - "$session_file" "$html_file" <<'PYEOF'
+import json, sys, datetime, math, html as htmllib
+
+session_path = sys.argv[1]
+html_path    = sys.argv[2]
+
+with open(session_path) as f:
+    data = json.load(f)
+
+steps   = data.get("steps", [])
+summary = data.get("summary", {})
+created = data.get("created", "")
+label   = data.get("own_label", "")
+
+def fmt_btc(v):
+    if v is None: return "—"
+    return "{:.8f} BTC".format(float(v))
+
+def fmt_usd(v):
+    if v is None: return "—"
+    return "${:,.2f}".format(float(v))
+
+def fmt_date(ts):
+    if not ts: return "—"
+    try:
+        return datetime.datetime.utcfromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return str(ts)
+
+def short(txid, n=12):
+    return txid[:n] + "…" + txid[-4:] if len(txid) > n + 4 else txid
+
+# ── Build graph data for JS ───────────────────────────────────────────────────
+# Nodes: one per tx step.  Edges: step[i] → step[i+1].
+nodes_js = []
+edges_js = []
+for i, s in enumerate(steps):
+    txid  = s.get("txid", "")
+    label_node = "#{} {}".format(i + 1, short(txid))
+    fee   = s.get("fee_btc", 0)
+    price = s.get("btc_price_usd")
+    self_ = s.get("is_self_transfer", False)
+    nodes_js.append({
+        "id":    i,
+        "label": label_node,
+        "txid":  txid,
+        "fee":   fee,
+        "date":  s.get("block_date", ""),
+        "self":  self_,
+        "color": "#f7931a" if not self_ else "#666",
+    })
+    if i + 1 < len(steps):
+        edges_js.append({"from": i, "to": i + 1,
+                         "followed": s.get("followed_output", -1)})
+
+nodes_json = json.dumps(nodes_js)
+edges_json = json.dumps(edges_js)
+
+# ── Build table rows ──────────────────────────────────────────────────────────
+rows = []
+for i, s in enumerate(steps):
+    self_cls = ' class="self-transfer"' if s.get("is_self_transfer") else ""
+    rows.append("""
+<tr{self_cls}>
+  <td>{step}</td>
+  <td class="mono"><a href="https://mempool.space/tx/{txid}" target="_blank" rel="noopener noreferrer">{short_txid}</a></td>
+  <td>{date}</td>
+  <td>{height}</td>
+  <td>{input_btc}</td>
+  <td>{input_usd}</td>
+  <td>{fee_btc}</td>
+  <td>{fee_usd}</td>
+  <td>{sent_btc}</td>
+  <td>{sent_usd}</td>
+  <td>{price}</td>
+  <td>{self_flag}</td>
+</tr>""".format(
+        self_cls=self_cls,
+        step=i + 1,
+        txid=s.get("txid", ""),
+        short_txid=short(s.get("txid", "")),
+        date=s.get("block_date", "—"),
+        height=s.get("block_height", "—"),
+        input_btc=fmt_btc(s.get("total_input_btc")),
+        input_usd=fmt_usd(s.get("total_input_usd")),
+        fee_btc=fmt_btc(s.get("fee_btc")),
+        fee_usd=fmt_usd(s.get("fee_usd")),
+        sent_btc=fmt_btc(s.get("value_sent_btc")),
+        sent_usd=fmt_usd(s.get("value_sent_usd")),
+        price=fmt_usd(s.get("btc_price_usd")),
+        self_flag="✓" if s.get("is_self_transfer") else "",
+    ))
+
+table_rows = "\n".join(rows)
+
+# ── Build CSV ─────────────────────────────────────────────────────────────────
+csv_lines = ["Step,TXID,Date,Block,Input BTC,Input USD,Fee BTC,Fee USD,Sent BTC,Sent USD,BTC Price USD,Self-Transfer"]
+for i, s in enumerate(steps):
+    csv_lines.append(",".join([
+        str(i + 1),
+        s.get("txid", ""),
+        s.get("block_date", ""),
+        str(s.get("block_height", "")),
+        str(s.get("total_input_btc", "")),
+        str(s.get("total_input_usd", "")),
+        str(s.get("fee_btc", "")),
+        str(s.get("fee_usd", "")),
+        str(s.get("value_sent_btc", "")),
+        str(s.get("value_sent_usd", "")),
+        str(s.get("btc_price_usd", "")),
+        "yes" if s.get("is_self_transfer") else "no",
+    ]))
+csv_data = "\n".join(csv_lines)
+
+# ── Summary box values ────────────────────────────────────────────────────────
+sum_steps    = summary.get("step_count", len(steps))
+sum_fee_btc  = fmt_btc(summary.get("total_fee_btc"))
+sum_fee_usd  = fmt_usd(summary.get("total_fee_usd"))
+sum_sent_btc = fmt_btc(summary.get("total_sent_btc"))
+sum_sent_usd = fmt_usd(summary.get("total_sent_usd"))
+sum_basis_btc= fmt_btc(summary.get("cost_basis_btc"))
+sum_basis_usd= fmt_usd(summary.get("cost_basis_usd"))
+own_label_html = htmllib.escape(label) if label else ""
+
+# ── HTML template ─────────────────────────────────────────────────────────────
+html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BoT Transaction Inspector — Cost-Basis Report</title>
+<style>
+  :root {{
+    --bg:     #0d0d0d;
+    --panel:  #161616;
+    --border: #2a2a2a;
+    --orange: #f7931a;
+    --text:   #e8e8e8;
+    --muted:  #888;
+    --green:  #4caf50;
+    --red:    #e05555;
+    --mono:   "Courier New", Courier, monospace;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: var(--bg); color: var(--text); font-family: system-ui, sans-serif;
+          font-size: 14px; padding: 24px; }}
+  h1   {{ color: var(--orange); font-size: 1.4rem; margin-bottom: 4px; }}
+  h2   {{ color: var(--orange); font-size: 1rem; margin: 20px 0 10px; text-transform: uppercase;
+           letter-spacing: .05em; }}
+  .meta {{ color: var(--muted); font-size: .8rem; margin-bottom: 24px; }}
+  .privacy-note {{ background: #1a1200; border: 1px solid #4a3000; border-radius: 6px;
+                   padding: 10px 14px; margin-bottom: 20px; font-size: .8rem;
+                   color: #c9a040; }}
+
+  /* Summary grid */
+  .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+              gap: 12px; margin-bottom: 28px; }}
+  .card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+           padding: 14px 16px; }}
+  .card .val {{ font-size: 1.1rem; font-weight: bold; color: var(--orange); margin-top: 4px; }}
+  .card .sub {{ font-size: .75rem; color: var(--muted); margin-top: 2px; }}
+  .card .lbl {{ font-size: .75rem; color: var(--muted); text-transform: uppercase;
+                letter-spacing: .04em; }}
+
+  /* Graph */
+  #graph-container {{ background: var(--panel); border: 1px solid var(--border);
+                      border-radius: 8px; overflow: hidden; margin-bottom: 28px;
+                      position: relative; height: 280px; }}
+  canvas#graph {{ width: 100%; height: 100%; display: block; }}
+  #graph-tip {{ position: absolute; background: #222; border: 1px solid var(--border);
+                border-radius: 4px; padding: 6px 10px; font-size: .75rem; pointer-events: none;
+                display: none; max-width: 280px; }}
+
+  /* Table */
+  .tbl-wrap {{ overflow-x: auto; margin-bottom: 24px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: .8rem; }}
+  th {{ background: #1e1e1e; color: var(--muted); text-align: left; padding: 8px 10px;
+        border-bottom: 1px solid var(--border); white-space: nowrap;
+        text-transform: uppercase; letter-spacing: .04em; font-size: .7rem; }}
+  td {{ padding: 7px 10px; border-bottom: 1px solid #1f1f1f; vertical-align: top; }}
+  tr:hover td {{ background: #1a1a1a; }}
+  tr.self-transfer td {{ color: var(--muted); }}
+  .mono {{ font-family: var(--mono); font-size: .75rem; }}
+  a {{ color: var(--orange); text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+
+  /* Buttons */
+  .actions {{ display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 24px; }}
+  button {{ background: var(--orange); color: #000; border: none; border-radius: 6px;
+            padding: 9px 18px; font-weight: bold; cursor: pointer; font-size: .85rem; }}
+  button:hover {{ filter: brightness(1.1); }}
+  button.sec {{ background: transparent; color: var(--orange);
+                border: 1px solid var(--orange); }}
+
+  .footer {{ color: var(--muted); font-size: .7rem; margin-top: 32px; line-height: 1.6; }}
+  .footer b {{ color: var(--text); }}
+</style>
+</head>
+<body>
+
+<h1>⛓ Transaction Inspector — Cost-Basis Report</h1>
+<div class="meta">
+  Generated: {generated}
+  {own_label_section}
+  &nbsp;·&nbsp; <span style="color:var(--muted)">Session:</span> <code style="font-size:.7rem">{session_path}</code>
+</div>
+
+<div class="privacy-note">
+  ⚠ <b>Privacy:</b> Transaction links point to <tt>mempool.space</tt> — clicking them reveals
+  the txid to that server. Use Tor Browser (this report opened in Tor Browser by default).
+  All data in this report is derived from your <b>local Bitcoin node</b> only.
+</div>
+
+<h2>Summary</h2>
+<div class="summary">
+  <div class="card"><div class="lbl">Transactions traced</div>
+    <div class="val">{sum_steps}</div></div>
+  <div class="card"><div class="lbl">Total fees</div>
+    <div class="val">{sum_fee_usd}</div>
+    <div class="sub">{sum_fee_btc}</div></div>
+  <div class="card"><div class="lbl">Total sent (non-self)</div>
+    <div class="val">{sum_sent_usd}</div>
+    <div class="sub">{sum_sent_btc}</div></div>
+  <div class="card"><div class="lbl">Original cost basis</div>
+    <div class="val">{sum_basis_usd}</div>
+    <div class="sub">{sum_basis_btc}</div></div>
+</div>
+
+<div class="actions">
+  <button onclick="downloadCSV()">Download CSV</button>
+  <button class="sec" onclick="window.print()">Print / Save PDF</button>
+</div>
+
+<h2>Transaction chain</h2>
+<div id="graph-container">
+  <canvas id="graph"></canvas>
+  <div id="graph-tip"></div>
+</div>
+
+<h2>Step detail</h2>
+<div class="tbl-wrap">
+<table>
+<thead>
+<tr>
+  <th>#</th><th>TXID</th><th>Date</th><th>Block</th>
+  <th>Input BTC</th><th>Input USD</th>
+  <th>Fee BTC</th><th>Fee USD</th>
+  <th>Sent BTC</th><th>Sent USD</th>
+  <th>BTC Price</th><th>Self</th>
+</tr>
+</thead>
+<tbody>
+{table_rows}
+</tbody>
+</table>
+</div>
+
+<div class="footer">
+  <b>Bitcoin on Tails</b> — Transaction Inspector v0.10 &nbsp;·&nbsp;
+  Price data: UTXOracle Consensus Price (your local node, no third-party APIs) &nbsp;·&nbsp;
+  This report is stored locally and was never transmitted.
+</div>
+
+<script>
+// ── CSV export ────────────────────────────────────────────────────────────────
+const CSV_DATA = {csv_json};
+function downloadCSV() {{
+  const blob = new Blob([CSV_DATA], {{type: "text/csv"}});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "tx-inspector-report.csv";
+  a.click();
+}}
+
+// ── Chain-graph (canvas, no external deps) ────────────────────────────────────
+(function() {{
+  const NODES = {nodes_json};
+  const EDGES = {edges_json};
+  if (!NODES.length) return;
+
+  const canvas = document.getElementById("graph");
+  const tip    = document.getElementById("graph-tip");
+  const ctx    = canvas.getContext("2d");
+
+  const W = () => canvas.parentElement.clientWidth;
+  const H = 280;
+
+  function resize() {{
+    canvas.width  = W();
+    canvas.height = H;
+    layout();
+    draw();
+  }}
+
+  // Simple left-to-right layout.
+  const positions = {{}};
+  function layout() {{
+    const n = NODES.length;
+    const w = W();
+    const padding = 60;
+    const step = n > 1 ? (w - padding * 2) / (n - 1) : 0;
+    NODES.forEach((nd, i) => {{
+      positions[nd.id] = {{
+        x: n === 1 ? w / 2 : padding + i * step,
+        y: H / 2,
+      }};
+    }});
+  }}
+
+  function draw() {{
+    const w = W();
+    ctx.clearRect(0, 0, w, H);
+
+    // Edges
+    ctx.strokeStyle = "#444";
+    ctx.lineWidth = 2;
+    EDGES.forEach(e => {{
+      const a = positions[e.from], b = positions[e.to];
+      if (!a || !b) return;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      // Arrow head
+      const angle = Math.atan2(b.y - a.y, b.x - a.x);
+      const al = 10, aw = 5;
+      ctx.beginPath();
+      ctx.moveTo(b.x, b.y);
+      ctx.lineTo(b.x - al * Math.cos(angle - aw / 10),
+                 b.y - al * Math.sin(angle - aw / 10));
+      ctx.lineTo(b.x - al * Math.cos(angle + aw / 10),
+                 b.y - al * Math.sin(angle + aw / 10));
+      ctx.closePath();
+      ctx.fillStyle = "#444";
+      ctx.fill();
+    }});
+
+    // Nodes
+    const R = 22;
+    NODES.forEach((nd, i) => {{
+      const p = positions[nd.id];
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, R, 0, Math.PI * 2);
+      ctx.fillStyle   = nd.self ? "#333" : "#f7931a22";
+      ctx.strokeStyle = nd.self ? "#555" : "#f7931a";
+      ctx.lineWidth   = 2;
+      ctx.fill();
+      ctx.stroke();
+
+      // Step number
+      ctx.fillStyle  = nd.self ? "#888" : "#f7931a";
+      ctx.font       = "bold 13px system-ui";
+      ctx.textAlign  = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("#" + (nd.id + 1), p.x, p.y);
+
+      // Date label below
+      ctx.fillStyle   = "#888";
+      ctx.font        = "10px system-ui";
+      ctx.fillText(nd.date || "", p.x, p.y + R + 14);
+    }});
+  }}
+
+  // Tooltip on hover.
+  canvas.addEventListener("mousemove", e => {{
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const R = 22;
+    let found = null;
+    NODES.forEach(nd => {{
+      const p = positions[nd.id];
+      if (Math.hypot(mx - p.x, my - p.y) < R + 4) found = nd;
+    }});
+    if (found) {{
+      tip.style.display = "block";
+      tip.style.left    = (e.clientX - rect.left + 12) + "px";
+      tip.style.top     = (e.clientY - rect.top  - 10) + "px";
+      tip.innerHTML = "<b>#" + (found.id + 1) + "</b> " + found.date +
+        "<br><span style='color:#888'>" + found.txid.slice(0, 20) + "…</span>" +
+        (found.self ? "<br><i>self-transfer</i>" :
+          "<br>fee: " + found.fee.toFixed(8) + " BTC");
+    }} else {{
+      tip.style.display = "none";
+    }}
+  }});
+  canvas.addEventListener("mouseleave", () => {{ tip.style.display = "none"; }});
+
+  window.addEventListener("resize", resize);
+  resize();
+}})();
+</script>
+</body>
+</html>
+""".format(
+    generated=datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+    own_label_section='&nbsp;·&nbsp; <b>Label:</b> ' + own_label_html if own_label_html else "",
+    session_path=htmllib.escape(session_path),
+    sum_steps=sum_steps,
+    sum_fee_btc=htmllib.escape(sum_fee_btc),
+    sum_fee_usd=htmllib.escape(sum_fee_usd),
+    sum_sent_btc=htmllib.escape(sum_sent_btc),
+    sum_sent_usd=htmllib.escape(sum_sent_usd),
+    sum_basis_btc=htmllib.escape(sum_basis_btc),
+    sum_basis_usd=htmllib.escape(sum_basis_usd),
+    csv_json=json.dumps(csv_data),
+    nodes_json=nodes_json,
+    edges_json=edges_json,
+    table_rows=table_rows,
+)
+
+with open(html_path, "w") as f:
+    f.write(html)
+
+print(html_path)
+PYEOF
+
+echo "bot-tx-report: report written to $html_file"
+
+# Open in Tor Browser if available, else xdg-open.
+if command -v torbrowser-launcher >/dev/null 2>&1; then
+    torbrowser-launcher "$html_file" >/dev/null 2>&1 &
+elif [ -x /usr/local/bin/tor-browser ]; then
+    /usr/local/bin/tor-browser "$html_file" >/dev/null 2>&1 &
+else
+    xdg-open "$html_file" >/dev/null 2>&1 &
+fi
