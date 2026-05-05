@@ -27,7 +27,6 @@
 # Environment (idempotent)
 export PATH="$HOME/.local/bin:$PATH"
 export ICON=--icon="$HOME/.local/share/icons/bot128.png"
-export WAYLAND_DISPLAY=""
 export TMPDIR=${TMPDIR:-$XDG_RUNTIME_DIR}
 export SOURCE="/live/persistence/TailsData_unlocked"
 export DATA_DIR="$SOURCE/Persistent/.bitcoin"

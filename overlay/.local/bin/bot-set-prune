@@ -15,7 +15,6 @@
 set -u
 
 export PATH="$HOME/.local/bin:/live/persistence/TailsData_unlocked/dotfiles/.local/bin:$PATH"
-export WAYLAND_DISPLAY=""
 export DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
 export DATA_DIR="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bitcoin}"
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$DOTFILES/.local/share}"

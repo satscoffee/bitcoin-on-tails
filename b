@@ -7,8 +7,7 @@
 # and launches install-core or install-knots.
 ###############################################################################
 
-export VERSION='v0.10.3-alpha'
-export WAYLAND_DISPLAY="" # Needed for zenity dialogs to have window icon
+export VERSION='v0.10.4-alpha'
 export ICON="--icon=$HOME/.local/share/icons/bot128.png"
 export DOTFILES='/live/persistence/TailsData_unlocked/dotfiles'
 readonly SECURITY_IN_A_BOX_URL="https://securityinabox.org/en/"

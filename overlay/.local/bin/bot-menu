@@ -15,7 +15,6 @@
 
 set -u
 
-export WAYLAND_DISPLAY=""
 export DOTFILES="/live/persistence/TailsData_unlocked/dotfiles"
 export PERSISTENT="/live/persistence/TailsData_unlocked/Persistent"
 export DATA_DIR="$PERSISTENT/.bitcoin"
@@ -358,7 +357,7 @@ mk_action() {
     # bot-menu's main process still gets the empty WAYLAND_DISPLAY for
     # window-icon rendering.
     printf 'x-terminal-emulator -T %q -e bash -lc %q &' "$title" \
-        "unset WAYLAND_DISPLAY; $cmd; echo; read -rsn 1 -p 'Press any key to close. ' _; echo"
+        "$cmd; echo; read -rsn 1 -p 'Press any key to close. ' _; echo"
 }
 
 build_bitcoin_tab() {
@@ -606,7 +605,7 @@ build_utxoracle_tab() {
         # at the top of this script, which makes Tor Browser's Wayland Proxy
         # attach to a null display and SIGTERM (exit 15). With it cleanly
         # unset, Tor Browser falls back to the real session display.
-        cmd_show="(unset WAYLAND_DISPLAY; $open_browser $(printf '%q' "$last_html")) >/dev/null 2>&1 &"
+        cmd_show="($open_browser $(printf '%q' "$last_html")) >/dev/null 2>&1 &"
     else
         cmd_show="zenity --info --title='No chart yet' \
             --text='Run UTXOracle Consensus Price or UTXOracle Block Window Price first to generate a chart.' \

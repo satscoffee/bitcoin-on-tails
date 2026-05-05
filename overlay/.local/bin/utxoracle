@@ -28,13 +28,6 @@ DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$DOTFILES/.local/share}"
 XDG_STATE_HOME="${XDG_STATE_HOME:-$DOTFILES/.local/state}"
 
-# bot-menu exports WAYLAND_DISPLAY="" globally to make zenity render window
-# icons. On Tails 7.x (Wayland default), an empty WAYLAND_DISPLAY makes
-# Tor Browser's Wayland Proxy attach to a null display, then SIGTERM itself
-# (exit 15). UTXOracle.py's webbrowser.open() and our own xdg-open at the
-# end both inherit it and crash. Unset cleanly so child browsers fall back
-# to the real Wayland socket / X11 forwarder.
-unset WAYLAND_DISPLAY
 
 UTXO_DIR="$XDG_DATA_HOME/bot/utxoracle"
 UTXO_PY="$UTXO_DIR/UTXOracle.py"

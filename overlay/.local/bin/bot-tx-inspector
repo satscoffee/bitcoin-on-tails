@@ -22,7 +22,6 @@
 
 set -u
 
-export WAYLAND_DISPLAY=""
 DATA_DIR="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bitcoin}"
 DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
 XDG_DATA_HOME="${XDG_DATA_HOME:-$DOTFILES/.local/share}"

@@ -13,7 +13,6 @@ set -u
 
 DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
 INSTALLED_BOT_DIR="${INSTALLED_BOT_DIR:-$DOTFILES/.local/share/bot}"
-WAYLAND_DISPLAY=""
 ICON_FILE="$HOME/.local/share/icons/bot128.png"
 ICON_ARG="--icon=$ICON_FILE"
 
