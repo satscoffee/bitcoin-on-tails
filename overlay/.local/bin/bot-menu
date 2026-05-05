@@ -15,6 +15,13 @@
 
 set -u
 
+# Force GTK to use X11 (via Xwayland on Tails 7.x Wayland sessions). yad's
+# --plug / --notebook / GtkSocket widgets are X11-only and will segfault
+# under native Wayland with "GtkPlug only works under X11". GDK_BACKEND=x11
+# routes them through Xwayland, which works transparently. Browsers spawned
+# from this script inherit the same and run under Xwayland too — works fine.
+export GDK_BACKEND=x11
+
 export DOTFILES="/live/persistence/TailsData_unlocked/dotfiles"
 export PERSISTENT="/live/persistence/TailsData_unlocked/Persistent"
 export DATA_DIR="$PERSISTENT/.bitcoin"

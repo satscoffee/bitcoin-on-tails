@@ -11,6 +11,10 @@
 
 set -u
 
+# Force GTK to X11 (Xwayland) for the yad form below — native Wayland
+# segfaults yad's GtkSocket widget on Tails 7.x.
+export GDK_BACKEND=x11
+
 DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
 INSTALLED_BOT_DIR="${INSTALLED_BOT_DIR:-$DOTFILES/.local/share/bot}"
 ICON_FILE="$HOME/.local/share/icons/bot128.png"
