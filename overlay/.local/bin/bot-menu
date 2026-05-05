@@ -349,8 +349,16 @@ mk_action() {
     # writes the prompt to stderr so it shows even when stdout is buffered.
     # Trailing `echo` puts the cursor on a fresh line before the terminal
     # emulator paints its own "Process exited" footer.
+    #
+    # `unset WAYLAND_DISPLAY` undoes bot-menu's top-of-file `export
+    # WAYLAND_DISPLAY=""` for the duration of the spawned bash. Without
+    # this, any browser launch (xdg-open, webbrowser.open()) inside the
+    # spawned command tries to attach Tor Browser to an empty Wayland
+    # display and gets SIGTERMed (exit 15) on Tails 7.x. zenity in
+    # bot-menu's main process still gets the empty WAYLAND_DISPLAY for
+    # window-icon rendering.
     printf 'x-terminal-emulator -T %q -e bash -lc %q &' "$title" \
-        "$cmd; echo; read -rsn 1 -p 'Press any key to close. ' _; echo"
+        "unset WAYLAND_DISPLAY; $cmd; echo; read -rsn 1 -p 'Press any key to close. ' _; echo"
 }
 
 build_bitcoin_tab() {
@@ -594,7 +602,11 @@ build_utxoracle_tab() {
     cmd_consensus="$(mk_action 'BoT — UTXOracle Consensus Price' "utxoracle; $refresh")"
     cmd_block="$(mk_action 'BoT — UTXOracle Block Window Price' "utxoracle -rb; $refresh")"
     if [ -n "$last_html" ] && [ -s "$last_html" ]; then
-        cmd_show="$open_browser $(printf '%q' "$last_html") >/dev/null 2>&1 &"
+        # `unset WAYLAND_DISPLAY` because bot-menu exports it as empty string
+        # at the top of this script, which makes Tor Browser's Wayland Proxy
+        # attach to a null display and SIGTERM (exit 15). With it cleanly
+        # unset, Tor Browser falls back to the real session display.
+        cmd_show="(unset WAYLAND_DISPLAY; $open_browser $(printf '%q' "$last_html")) >/dev/null 2>&1 &"
     else
         cmd_show="zenity --info --title='No chart yet' \
             --text='Run UTXOracle Consensus Price or UTXOracle Block Window Price first to generate a chart.' \
