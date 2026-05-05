@@ -68,23 +68,33 @@ cd "$OUTPUT_DIR" || exit 4
 RUN_LOG="$(mktemp)"
 trap 'rm -f "$RUN_LOG"' EXIT
 
-python3 "$UTXO_PY" -p "$DATA_DIR" "$@" 2>&1 | tee "$RUN_LOG"
+# Suppress the Python 3.12 DeprecationWarning from datetime.utcfromtimestamp()
+# inside UTXOracle.py — it's a cosmetic upstream issue, not a BoT bug, and
+# the noise drowns the actual price output in the terminal.
+PYTHONWARNINGS=ignore::DeprecationWarning \
+    python3 "$UTXO_PY" -p "$DATA_DIR" "$@" 2>&1 | tee "$RUN_LOG"
 PYRC="${PIPESTATUS[0]}"
 if [ "$PYRC" -ne 0 ]; then
     exit "$PYRC"
 fi
-
-# Parse "<Mon DD, YYYY> price: $<num>" line UTXOracle prints in date mode.
-# In block mode there's no such summary; we record the file path only.
-PRICE_LINE=$(grep -E 'price:[[:space:]]*\$' "$RUN_LOG" | tail -1 | sed 's/^[[:space:]]*//')
-LATEST_HTML=$(ls -t UTXOracle_*.html 2>/dev/null | head -1)
-[ -n "$LATEST_HTML" ] && LATEST_HTML="$OUTPUT_DIR/$LATEST_HTML"
 
 # Determine which mode was used (date vs block window) by inspecting argv.
 MODE="consensus"   # default = date mode = UTXOracle Consensus Price
 for a in "$@"; do
     [ "$a" = "-rb" ] && MODE="block_window"
 done
+
+# Consensus mode prints a summary line; block-window mode does not — the price
+# is only embedded in the HTML canvas title.  Extract it from the HTML so the
+# bot-menu KV always has a human-readable price regardless of mode.
+LATEST_HTML=$(ls -t UTXOracle_*.html 2>/dev/null | head -1)
+[ -n "$LATEST_HTML" ] && LATEST_HTML="$OUTPUT_DIR/$LATEST_HTML"
+
+PRICE_LINE=$(grep -E 'price:[[:space:]]*\$' "$RUN_LOG" | tail -1 | sed 's/^[[:space:]]*//')
+if [ -z "$PRICE_LINE" ] && [ -n "$LATEST_HTML" ] && [ -s "$LATEST_HTML" ]; then
+    # Block-window run: pull price from the canvas title baked into the HTML.
+    PRICE_LINE=$(grep -o 'UTXOracle.*Price \$[0-9,]*' "$LATEST_HTML" 2>/dev/null | head -1 || true)
+fi
 
 # Atomic KV write so bot-menu never sees a half-written file.
 TMP_KV="$(mktemp "${LAST_KV}.XXXXXX")"

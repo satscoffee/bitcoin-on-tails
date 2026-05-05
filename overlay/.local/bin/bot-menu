@@ -553,25 +553,41 @@ build_utxoracle_tab() {
         server_status="Stopped"
     fi
 
+    # Open-in-browser helper: prefer Tor Browser (correct on Tails), fall back
+    # to xdg-open.  Used for local HTML files — NOT for 127.0.0.1 URLs because
+    # Tor Browser routes localhost correctly but other apps (Onion Browser on
+    # iOS, external devices) cannot reach 127.0.0.1 on this machine.
+    local open_browser
+    if command -v torbrowser-launcher >/dev/null 2>&1; then
+        open_browser="torbrowser-launcher"
+    elif [ -x /usr/local/bin/tor-browser ]; then
+        open_browser="/usr/local/bin/tor-browser"
+    else
+        open_browser="xdg-open"
+    fi
+
+    # After running either utxoracle compute, relaunch bot-menu so the
+    # "Last run" / "Last result" fields reflect the new KV without the user
+    # having to close and reopen manually.
+    local refresh='pkill -f "yad --notebook" 2>/dev/null; sleep 0.3; bot-menu &'
+
     # Action commands.
-    local cmd_consensus cmd_block cmd_show cmd_serve_start cmd_serve_stop cmd_serve_open cmd_serve_status
-    cmd_consensus="$(mk_action 'BoT — UTXOracle Consensus Price' 'utxoracle')"
-    cmd_block="$(mk_action 'BoT — UTXOracle Block Window Price' 'utxoracle -rb')"
+    local cmd_consensus cmd_block cmd_show cmd_serve_start cmd_serve_stop cmd_serve_status
+    cmd_consensus="$(mk_action 'BoT — UTXOracle Consensus Price' "utxoracle; $refresh")"
+    cmd_block="$(mk_action 'BoT — UTXOracle Block Window Price' "utxoracle -rb; $refresh")"
     if [ -n "$last_html" ] && [ -s "$last_html" ]; then
-        cmd_show="xdg-open $(printf '%q' "$last_html") >/dev/null 2>&1 &"
+        cmd_show="$open_browser $(printf '%q' "$last_html") >/dev/null 2>&1 &"
     else
         cmd_show="zenity --info --title='No chart yet' \
             --text='Run UTXOracle Consensus Price or UTXOracle Block Window Price first to generate a chart.' \
             --ellipsize $ICON_ARG &"
     fi
-    # Server controls go through utxoracle-serve. Wrap in a terminal so
-    # users see start-up logs and can read errors before the window closes.
+    # Server controls — wrap in a terminal so users see start/stop output.
     cmd_serve_start="$(mk_action  'BoT — start utxoracle-serve'  'utxoracle-serve start')"
     cmd_serve_stop="$(mk_action   'BoT — stop utxoracle-serve'   'utxoracle-serve stop')"
     cmd_serve_status="$(mk_action 'BoT — utxoracle-serve status' 'utxoracle-serve status')"
-    cmd_serve_open="utxoracle-serve open >/dev/null 2>&1 &"
 
-    canonical="<b>UTXOracle</b> derives a Bitcoin price from <b>your own node's data only</b> — no third-party APIs, no IP leaks. Bundled snapshot from <tt>utxo.live</tt>; license preserved at <tt>$XDG_DATA_HOME/bot/utxoracle/LICENSE.txt</tt>.\n\n<b>Local HTTP price server (utxoracle-serve):</b> binds to <tt>127.0.0.1</tt> only, refreshes on each new confirmed block, exposes CoinGecko/Coinbase-shape endpoints + a native /price?date= for historical lookups. Sparrow Wallet doesn't yet support custom price-source URLs in its stable release; this server is the foundation. From a terminal: <tt>btcprice</tt> for the latest price, <tt>btcprice 2024-04-15</tt> for a date."
+    canonical="<b>UTXOracle</b> derives a Bitcoin price from <b>your own node's data only</b> — no third-party APIs, no IP leaks. Bundled snapshot from <tt>utxo.live</tt>; license preserved at <tt>$XDG_DATA_HOME/bot/utxoracle/LICENSE.txt</tt>.\n\n<b>Local HTTP price server (utxoracle-serve):</b> binds to <tt>127.0.0.1</tt> only, refreshes on each new confirmed block, exposes CoinGecko/Coinbase-shape endpoints + a native /price?date= for historical lookups. Accessible from Tor Browser on this Tails session only — external devices and other browsers (including Onion Browser on iOS) cannot reach 127.0.0.1 on this machine. From a terminal: <tt>btcprice</tt> for the latest price, <tt>btcprice 2024-04-15</tt> for a date."
 
     yad --plug="$key" --tabnum=4 \
         --form --columns=1 \
@@ -587,7 +603,6 @@ build_utxoracle_tab() {
         --field="Start utxoracle-serve:FBTN" "$cmd_serve_start" \
         --field="Stop utxoracle-serve:FBTN"  "$cmd_serve_stop" \
         --field="Show server status:FBTN"    "$cmd_serve_status" \
-        --field="Open status page in browser:FBTN" "$cmd_serve_open" \
         --field=":LBL" "$canonical" &
 }
 
