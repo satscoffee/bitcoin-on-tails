@@ -12,8 +12,11 @@ export DATA_DIR=/live/persistence/TailsData_unlocked/Persistent/.bitcoin
 # shellcheck disable=SC1090
 . "/home/$USER/.profile"
 persistent-setup # Checks needed persistent features are on.
-# Symlink at default datadir to our custom datadir
-ln -s /live/persistence/TailsData_unlocked/Persistent/.* ~
+# Symlink default datadirs (~/.bitcoin, ~/.sparrow, etc.) into Persistent
+# Storage. -f so re-launches don't fail with "File exists" once the symlinks
+# already exist; suppress shell errors so a single failure (e.g. ~/.profile
+# already a regular file) doesn't abort the wrapped launch.
+ln -sf /live/persistence/TailsData_unlocked/Persistent/.* ~ 2>/dev/null || true
 
 # Update favorite apps list
 

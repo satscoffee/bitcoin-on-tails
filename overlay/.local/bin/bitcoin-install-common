@@ -743,14 +743,23 @@ bot_remove_impl_binaries() {
 
 set -m # Enable job control
 
-# Download SHA256SUMS and SHA256SUMS.asc in background
+# Download SHA256SUMS and SHA256SUMS.asc in background.
+#
+# `--timeout=60 --tries=10` caps per-attempt wait time. Tor circuits often
+# return "Read error (Decryption has failed.) in headers" for the first few
+# attempts before stabilizing — without this cap, wget can spin for minutes
+# on bad circuits. retry_on_fail's outer loop will continue if all 10
+# tries fail, but each cycle is bounded.
 cd "$DOWNLOAD_DIR" || exit 1
-retry_on_fail wget -cxnH --cut-dirs=5 -O "SHA256SUMS.tmp"     "$SIGS_URL"       & sig_dl_1=$!
-retry_on_fail wget -cxnH --cut-dirs=5 -O "SHA256SUMS.asc.tmp" "${SIGS_URL}.asc" & sig_dl_2=$!
+retry_on_fail wget -cxnH --cut-dirs=5 --timeout=60 --tries=10 \
+    -O "SHA256SUMS.tmp"     "$SIGS_URL"       & sig_dl_1=$!
+retry_on_fail wget -cxnH --cut-dirs=5 --timeout=60 --tries=10 \
+    -O "SHA256SUMS.asc.tmp" "${SIGS_URL}.asc" & sig_dl_2=$!
 
 # Download binary tarball in background
 mkdir -p "$DOWNLOAD_DIR/bitcoin-core-$VER"
-retry_on_fail wget -cxnH --cut-dirs=5 -O "bitcoin-core-$VER/$TAR_NAME" "$TAR_URL" & get_core=$!
+retry_on_fail wget -cxnH --cut-dirs=5 --timeout=60 --tries=10 \
+    -O "bitcoin-core-$VER/$TAR_NAME" "$TAR_URL" & get_core=$!
 
 printf '\033]2;Getting %s trusted keys...\a' "$DIST_LABEL"
 if OLD_VER=$(bitcoind --version 2>/dev/null); then
@@ -887,13 +896,30 @@ else
     else
         echo "Warning: chainparams.cpp fetch failed or timed out; using fallback values (chain ~${assumed_blockchain_size} GB / chainstate ~${assumed_chain_state_size} GB) for prune sizing." >&2
     fi
-    # Move completed verified download to persistent storage
-    rsync -vh --remove-source-files --recursive "$DOWNLOAD_DIR" $XDG_DATA_HOME
-    mkdir -p $DATA_DIR/{wallets,blocks} # TODO: this can be replaced by creating the symlink in panic mode solution
-    ln --symbolic --force -b /media/"$USER" $DATA_DIR/wallets     # links media mount directory to wallets folder for easier loading of watch encrypted or external media wallets
-    chmod -w $DATA_DIR/wallets  # TODO: this can be deleted when panic mode is added
-    ln --symbolic --force -b {"$HOME"/.bitcoin,$DATA_DIR}/debug.log # symlinks to tmpfs debug.log
-    ln --symbolic --force -b $DOTFILES/.bitcoin/{README.md,bitcoin.conf} $DATA_DIR # symlinks to dotfiles/.bitcoin
+    # Move completed verified download to persistent storage. When persistence
+    # was already up at download time, $DOWNLOAD_DIR is *already inside*
+    # $XDG_DATA_HOME/bitcoin — making this a no-op self-rsync that errors out
+    # with "Skipping sender remove" warnings (exit 23). Detect that and skip.
+    download_real="$(readlink -f "$DOWNLOAD_DIR" 2>/dev/null)"
+    target_real="$(readlink -f "$XDG_DATA_HOME/$(basename "$DOWNLOAD_DIR")" 2>/dev/null)"
+    if [ -n "$download_real" ] && [ "$download_real" = "$target_real" ]; then
+        echo "Download already in persistent storage at $DOWNLOAD_DIR — skipping rsync."
+    else
+        rsync -vh --remove-source-files --recursive "$DOWNLOAD_DIR" "$XDG_DATA_HOME" || true
+    fi
+
+    mkdir -p "$DATA_DIR"/{wallets,blocks}
+    # Make wallets writable in case a previous install left it chmod -w'd
+    # below. Without this, the `ln` calls fail to create their backup file
+    # and abort with "Permission denied".
+    chmod +w "$DATA_DIR/wallets" 2>/dev/null || true
+    # Drop `-b` (backup) from these ln invocations: with --force we don't
+    # need a backup of the previous symlink, and -b creating a `.~` file in
+    # a chmod'd-readonly dir was the actual cause of the permission errors.
+    ln --symbolic --force /media/"$USER" "$DATA_DIR/wallets" 2>/dev/null || true
+    chmod -w "$DATA_DIR/wallets"  # TODO: this can be deleted when panic mode is added
+    ln --symbolic --force {"$HOME"/.bitcoin,$DATA_DIR}/debug.log 2>/dev/null || true
+    ln --symbolic --force $DOTFILES/.bitcoin/{README.md,bitcoin.conf} $DATA_DIR 2>/dev/null || true
     # Calculate space available for block file storage
     avail_gb=$(($(df --output=avail $SOURCE | tail -1) * 1024 / 10 ** 9))
     # Ask the user how much of the chain to keep. The picker presents a
