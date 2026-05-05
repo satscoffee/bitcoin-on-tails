@@ -142,4 +142,9 @@ bot_remove_impl_binaries "$current"
 # version pickers, signature verification, and dist-marker write. Use exec
 # so the user sees the install script's terminal output without an extra
 # layer of subshell.
+#
+# BOT_SKIP_STORAGE_PICKERS=1 tells bitcoin-install-common to skip the prune
+# and network pickers and preserve the existing settings.json — a switch is a
+# binary swap, not a storage reconfiguration.
+export BOT_SKIP_STORAGE_PICKERS=1
 exec "install-$target"

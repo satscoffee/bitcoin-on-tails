@@ -920,35 +920,53 @@ else
     chmod -w "$DATA_DIR/wallets"  # TODO: this can be deleted when panic mode is added
     ln --symbolic --force {"$HOME"/.bitcoin,$DATA_DIR}/debug.log 2>/dev/null || true
     ln --symbolic --force $DOTFILES/.bitcoin/{README.md,bitcoin.conf} $DATA_DIR 2>/dev/null || true
-    # Calculate space available for block file storage
+    # Calculate space available for block file storage.
+    # Add already-downloaded chain data to free space so the archival threshold
+    # is correct for users who have 90%+ of the chain already on disk.  Without
+    # this, bot_pick_prune compares raw free space against the full-chain size
+    # and concludes "too small for archival" even when the data is already there.
     avail_gb=$(($(df --output=avail $SOURCE | tail -1) * 1024 / 10 ** 9))
-    # Ask the user how much of the chain to keep. The picker presents a
-    # recommendation tailored to free disk space (archival if there's room,
-    # otherwise pruned-to-fit) plus custom and archival overrides. If the
-    # user cancels we fall back to the auto-calculated value (legacy
-    # behavior, never wedges the install).
-    if ! prune_MiB=$(bot_pick_prune "$avail_gb" "$assumed_blockchain_size" "$assumed_chain_state_size"); then
-        space=$(( avail_gb - assumed_chain_state_size - 10 ))
-        auto_prune_GB=$(( space > 2 ? space : 2 ))
-        prune_MiB=$(( space > assumed_blockchain_size ? 0 : auto_prune_GB * 10 ** 9 / 1024 ** 2 ))
-    fi
-    if (( prune_MiB > 0 )); then
-        prune_GB=$(( prune_MiB * 1024**2 / 10**9 ))
+    already_on_disk_gb=$(( ($(du -sb "$DATA_DIR/blocks" "$DATA_DIR/chainstate" "$DATA_DIR/indexes" 2>/dev/null | awk '{s+=$1} END{print s+0}')) / 10**9 ))
+    effective_avail_gb=$(( avail_gb + already_on_disk_gb ))
+    # BOT_SKIP_STORAGE_PICKERS=1 is set by bot-switch-impl so that a binary
+    # swap doesn't reprompt the user for prune/network choices they already
+    # made.  In that mode we read the existing settings.json and skip both
+    # pickers and the settings.json rewrite entirely.
+    if [ "${BOT_SKIP_STORAGE_PICKERS:-0}" = "1" ] && [ -f "$DATA_DIR/settings.json" ]; then
+        prune_MiB=$(python3 -c \
+            "import json,sys; d=json.load(open('$DATA_DIR/settings.json')); print(d.get('prune',0))" \
+            2>/dev/null || echo 0)
+        prune_MiB=${prune_MiB:-0}
+        if (( prune_MiB > 0 )); then
+            prune_GB=$(( prune_MiB * 1024**2 / 10**9 ))
+        else
+            prune_GB=0
+        fi
+        echo "bot-switch-impl: BOT_SKIP_STORAGE_PICKERS set — preserving existing settings.json (prune=${prune_MiB} MiB)." >&2
     else
-        prune_GB=0
-    fi
-    # Cache chainparams.cpp into a stable location so bot-set-prune can read
-    # the same assumed sizes later without a fresh network probe.
-    install -D -m 0644 "$DOWNLOAD_DIR/chainparams.cpp" \
-        "$XDG_DATA_HOME/bot/chainparams.cpp" 2>/dev/null || true
+        # Ask the user how much of the chain to keep. The picker presents a
+        # recommendation tailored to free disk space (archival if there's room,
+        # otherwise pruned-to-fit) plus custom and archival overrides. If the
+        # user cancels we fall back to the auto-calculated value (legacy
+        # behavior, never wedges the install).
+        if ! prune_MiB=$(bot_pick_prune "$effective_avail_gb" "$assumed_blockchain_size" "$assumed_chain_state_size"); then
+            space=$(( effective_avail_gb - assumed_chain_state_size - 10 ))
+            auto_prune_GB=$(( space > 2 ? space : 2 ))
+            prune_MiB=$(( space > assumed_blockchain_size ? 0 : auto_prune_GB * 10 ** 9 / 1024 ** 2 ))
+        fi
+        if (( prune_MiB > 0 )); then
+            prune_GB=$(( prune_MiB * 1024**2 / 10**9 ))
+        else
+            prune_GB=0
+        fi
 
-    # Ask which network mode to use. Falls back to Tor (recommended) on cancel
-    # so the install never wedges and the user is never accidentally on
-    # clearnet with their IP exposed.
-    network_mode=$(bot_pick_network) || network_mode="tor"
-    case "$network_mode" in
-        tor-only)
-            cat > "$DATA_DIR/settings.json" <<JSON
+        # Ask which network mode to use. Falls back to Tor (recommended) on cancel
+        # so the install never wedges and the user is never accidentally on
+        # clearnet with their IP exposed.
+        network_mode=$(bot_pick_network) || network_mode="tor"
+        case "$network_mode" in
+            tor-only)
+                cat > "$DATA_DIR/settings.json" <<JSON
 {
     "dbcache": "450",
     "onion": "127.0.0.1:9050",
@@ -958,18 +976,18 @@ else
     "server": true
 }
 JSON
-            ;;
-        clearnet)
-            cat > "$DATA_DIR/settings.json" <<JSON
+                ;;
+            clearnet)
+                cat > "$DATA_DIR/settings.json" <<JSON
 {
     "dbcache": "450",
     "prune": "$prune_MiB",
     "server": true
 }
 JSON
-            ;;
-        tor|*)
-            cat > "$DATA_DIR/settings.json" <<JSON
+                ;;
+            tor|*)
+                cat > "$DATA_DIR/settings.json" <<JSON
 {
     "dbcache": "450",
     "onion": "127.0.0.1:9050",
@@ -978,9 +996,15 @@ JSON
     "server": true
 }
 JSON
-            ;;
-    esac
+                ;;
+        esac
+    fi
 
+    # Cache chainparams.cpp into a stable location so bot-set-prune can read
+    # the same assumed sizes later without a fresh network probe.  Runs in both
+    # normal-install and skip-pickers paths.
+    install -D -m 0644 "$DOWNLOAD_DIR/chainparams.cpp" \
+        "$XDG_DATA_HOME/bot/chainparams.cpp" 2>/dev/null || true
 
     if ((prune_MiB)); then
         storageRequiresMsg="Approximately $((prune_GB + assumed_chain_state_size)) GB of data will be stored in your Persistent Storage."
