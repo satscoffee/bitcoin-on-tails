@@ -169,12 +169,37 @@ for pkg in "${required_pkgs[@]}"; do
     dpkg-query -W -f='${Status}\n' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing_pkgs+=("$pkg")
 done
 if ((${#missing_pkgs[@]})); then
-    # Recommend enabling Additional Software persistence first, if it isn't on.
+    # If Additional Software is NOT active, give the user a hard choice:
+    # set it up now (so the library auto-installs every boot, no admin
+    # password, no waiting) or explicitly accept session-only install.
+    # This is intentionally a two-button question rather than a dismissible
+    # info dialog — the "Install Every Time" path is the right answer and
+    # we want users to land there without accidentally skipping past it.
     if ! /usr/local/lib/tpscli is-active AdditionalSoftware 2>/dev/null; then
-        bot_raise_dialog 'Recommended: enable "Additional Software" persistence'
-        zenity --info --title='Recommended: enable "Additional Software" persistence' \
-            --text="Bitcoin Core's GUI (<tt>bitcoin-qt</tt>) needs <tt>${missing_pkgs[*]}</tt>, an X11 multi-monitor extension that Tails 6.x removed from its base image. Without it the wallet window won't open.\n\n<b>Strongly recommended:</b> before continuing, open <b>Persistent Storage</b> and turn on the <b>Additional Software</b> feature.\n\nWith Additional Software enabled, Tails will ask whether to install this library <i>once</i> or <i>every time you start Tails</i>. Choose <b>Install Every Time</b> — then it reinstalls automatically on every boot, no admin password, no waiting on apt.\n\nWithout Additional Software, the library installs only for this session and must be reinstalled after every reboot.\n\nClick OK to continue with the installation." \
-            --ok-label='OK, Continue' "$ICON" --icon=tails-persistent-storage
+        bot_raise_dialog 'Action required: missing library for Bitcoin GUI'
+        if zenity --question \
+            --title='Action required: missing library for Bitcoin GUI' \
+            --text="Bitcoin Core's GUI needs <tt>${missing_pkgs[*]}</tt>, a small X11 library that Tails 6.x dropped from its base image. Without it the wallet window won't open.\n\n<b>Option A — Enable Additional Software (recommended):</b>\nOpen Persistent Storage → turn on <b>Additional Software</b>. When prompted by Tails, choose <b>Install Every Time</b>. After that, this library installs automatically at every boot — no admin password ever again.\n\n<b>Option B — Install for this session only:</b>\nInstalls now using your admin password, but is gone after reboot. You will be prompted again on every boot until you enable Additional Software.\n\nWhat would you like to do?" \
+            --ok-label='Set up Additional Software first' \
+            --cancel-label='Install for this session only' \
+            "$ICON" --icon=tails-persistent-storage 2>/dev/null; then
+            # User wants to set up Additional Software first. Open TPS and
+            # wait for AdditionalSoftware to be toggled on, then continue.
+            tails-persistent-storage &>/dev/null &
+            notify-send --icon=tails-persistent-storage \
+                'Turn on "Additional Software" in Persistent Storage, then re-run Bitcoin on Tails.'
+            until /usr/local/lib/tpscli is-active AdditionalSoftware 2>/dev/null; do
+                sleep 2
+                /usr/local/lib/tpscli is-active AdditionalSoftware 2>/dev/null && break
+                # If user closed TPS without enabling, re-open it.
+                pgrep -f 'python3 /usr/local/lib/tps-frontend' >/dev/null 2>&1 || \
+                    tails-persistent-storage &>/dev/null &
+            done
+            pkill -f "python3 /usr/local/lib/tps-frontend" &>/dev/null || true
+        fi
+        # Fall through — install via apt regardless of path chosen above.
+        # If Additional Software is now active, Tails will ask "install
+        # every time?" during the apt run — that's the Tails-native UX.
     fi
 
     bot_raise_dialog 'Install missing libraries for Bitcoin Core'
@@ -185,7 +210,8 @@ if ((${#missing_pkgs[@]})); then
         sudo apt-get update -q
         # When Additional Software is enabled, apt/tails-additional-software will
         # prompt the user whether to install once or persistently — that's the
-        # Tails-native UX and is exactly what we want.
+        # Tails-native UX and is exactly what we want. User should choose
+        # "Install Every Time" to avoid being re-prompted on every reboot.
         if sudo apt-get install -y "${missing_pkgs[@]}"; then
             :
         else

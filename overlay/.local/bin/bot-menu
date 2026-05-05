@@ -569,7 +569,12 @@ build_utxoracle_tab() {
     # After running either utxoracle compute, relaunch bot-menu so the
     # "Last run" / "Last result" fields reflect the new KV without the user
     # having to close and reopen manually.
-    local refresh='pkill -f "yad --notebook" 2>/dev/null; sleep 0.3; bot-menu &'
+    # NOTE: must NOT use "bot-menu &" here — mk_action appends "; echo; read..."
+    # and the "&;" combination is a POSIX syntax error that aborts the shell.
+    # "exec bot-menu" replaces the bash process with bot-menu directly; the
+    # trailing "; echo; read..." in the mk_action template is never reached
+    # (exec replaces the process), so there is no "&;" and no syntax error.
+    local refresh='pkill -f "yad --notebook" 2>/dev/null; sleep 0.5; exec bot-menu'
 
     # Action commands.
     local cmd_consensus cmd_block cmd_show cmd_serve_start cmd_serve_stop cmd_serve_status

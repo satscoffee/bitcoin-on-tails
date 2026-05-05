@@ -99,4 +99,13 @@ done
 # pipe ends, but kill it explicitly in case of races).
 kill "$zen_pid" 2>/dev/null
 wait "$zen_pid" 2>/dev/null
+
+# Remove the directory lock file now that the daemon has fully exited.
+# Bitcoin uses flock(2) on $DATA_DIR/.lock — the OS releases the lock the
+# instant the process dies, but the file itself persists.  On the rare
+# occasion that a subsequent start attempt fails with "cannot obtain a lock"
+# (e.g. a previous SIGKILL left a kernel-level lock in an unusual state),
+# removing the empty file here lets the next launch succeed without a reboot.
+rm -f "$DATA_DIR/.lock" 2>/dev/null || true
+
 exit 0

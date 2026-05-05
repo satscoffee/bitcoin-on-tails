@@ -132,14 +132,18 @@ if [ -s "$KEY_CACHE_FILE" ]; then
     printf '\033]2;Using cached dathonohm signing key...\a'
 else
     printf '\033]2;Fetching dathonohm signing key from GitHub...\a'
-    if curl -sL --fail --max-time 30 -o dathonohm.asc "$BIP110_KEY_URL_GITHUB" \
+    # 15-second cap keeps total key-fetch time under ~35s even if GitHub is
+    # slow on Tor (previously 30s + keyserver fallback = 60s+).
+    if curl -sL --fail --max-time 15 -o dathonohm.asc "$BIP110_KEY_URL_GITHUB" \
         && [ -s dathonohm.asc ]; then
         KEY_SOURCE_DISPLAY="$BIP110_KEY_URL_GITHUB"
     else
         printf '\033]2;GitHub fetch failed; trying keyservers...\a'
-        # Keyserver fallback. Try both, take whichever returns the matching key.
+        # Keyserver fallback. --keyserver-options timeout=15 caps each
+        # attempt so a dead keyserver doesn't add another 30+ seconds.
         for ks in "$BIP110_KEY_KEYSERVER_1" "$BIP110_KEY_KEYSERVER_2"; do
-            if gpg --keyserver "$ks" --recv-keys "$BIP110_PINNED_SHORTID" &>/dev/null; then
+            if gpg --keyserver "$ks" --keyserver-options timeout=15 \
+                   --recv-keys "$BIP110_PINNED_SHORTID" &>/dev/null; then
                 gpg --export --armor "$BIP110_PINNED_SHORTID" > dathonohm.asc 2>/dev/null
                 if [ -s dathonohm.asc ]; then
                     KEY_SOURCE_DISPLAY="keyserver $ks"
