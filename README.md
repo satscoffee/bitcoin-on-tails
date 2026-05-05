@@ -12,7 +12,7 @@ BoT does not generate seeds, design backup schemes, or pick wallet policies for 
 
 ## What it installs
 
-- **Bitcoin Core** or **Bitcoin Knots** — pick one at install time. Both are full-node implementations; Knots is Luke Dashjr's fork with extra relay policy options.
+- **Bitcoin Core**, **Bitcoin Knots**, or **Bitcoin Knots + BIP-110** — pick one at install time. All three are full-node implementations sharing the same chain format. Knots is Luke Dashjr's fork with extra relay policy options. The BIP-110 build is dathonohm's Knots fork that signals support for [BIP-110](https://bip110.org), a soft-fork proposal limiting non-`OP_RETURN` outputs to 34 bytes and `OP_RETURN` to 83 bytes. Running the BIP-110 build counts your node as an active signaler; if you don't know what that means, pick Core or Knots instead — there is real chain-split risk if BIP-110 activates differently than your node enforces.
 - **Sparrow Wallet** (optional) — desktop Bitcoin wallet that talks to your local Core/Knots node over RPC, so wallet queries never leak to a third-party Electrum server.
 - **UTXOracle** (bundled) — Steven Roose's single-file Python script that derives a Bitcoin price from your own node's transaction data. No third-party APIs, no IP leaks. Available from the Apps menu and from the **UTXOracle Price** tab in `bot-menu`. The bundled snapshot has the upstream auto-loading YouTube iframe replaced with a plain link (Tor circuit safety) but is otherwise unmodified; the UTXOracle License is preserved alongside the script.
 - **`utxoracle-serve`** — local HTTP price oracle backed by UTXOracle, bound to `127.0.0.1` only. Recomputes the UTXOracle Block Window Price on each new confirmed block and exposes CoinGecko-shape, Coinbase-shape, and native endpoints — including historical lookups via `/price?date=YYYY-MM-DD`. Foundation for future Sparrow Wallet integration; usable today by any tool that takes a custom price-source URL or by the bundled `btcprice` CLI.
@@ -25,6 +25,7 @@ Every release is verified before it's installed. There is no curl-pipe-bash, no 
 
 - **Bitcoin Core** — multi-signer verification against [bitcoin-core/guix.sigs](https://github.com/bitcoin-core/guix.sigs). The installer requires at least 3 valid signatures from the published builders for the exact release file before unpacking it.
 - **Bitcoin Knots** — single-signer verification against Luke Dashjr's PGP key, matching the publication model upstream uses.
+- **Bitcoin Knots + BIP-110** — single-signer verification against dathonohm's PGP key, pinned against short fingerprint `0x2E3A66FF67F98B4F`. Tarballs and `SHA256SUMS.asc` come from `github.com/dathonohm/bitcoin/releases`. The pinned short ID is a sanity check; the authoritative gate is `gpg --verify SHA256SUMS.asc SHA256SUMS` against the imported full key.
 - **Sparrow Wallet** — single-signer verification against Craig Raw's pinned PGP fingerprint, fetched from cache, Keybase, GitHub, or a keyserver and double-checked against the value baked into the script.
 
 If signature verification fails, the install stops and tells you why.
@@ -43,7 +44,7 @@ The first run helps you turn on Persistent Storage and the right TPS features (D
 
 - `b` — top-level installer / updater. Run with no arguments to install or update; pass `--version` to print the BoT version.
 - `bot-menu` — yad-based control panel. Status, Bitcoin, Sparrow, UTXOracle Price, and About tabs.
-- `install-core`, `install-knots`, `install-sparrow` — standalone installers for each component.
+- `install-core`, `install-knots`, `install-knots-bip110`, `install-sparrow` — standalone installers for each component.
 - `utxoracle` — one-shot wrapper around the bundled UTXOracle snapshot. `utxoracle` for yesterday's UTXOracle Consensus Price, `utxoracle -rb` for the UTXOracle Block Window Price (last 144 confirmed blocks). Generates a chart and opens it in Tor Browser.
 - `utxoracle-serve` — start/stop/status control for the local HTTP price oracle (loopback-only, refreshes per block). `utxoracle-serve start | stop | status | restart | url | open`.
 - `btcprice` — terminal one-liner that hits `utxoracle-serve` and prints the latest price. Pass a date (`btcprice 2024-04-15`) for the UTXOracle Consensus Price for that day.

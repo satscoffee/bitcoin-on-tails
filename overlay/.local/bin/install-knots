@@ -159,7 +159,7 @@ mapfile -t KNOTS_FINGERPRINTS < <(
 if ((${#KNOTS_FINGERPRINTS[@]} == 0)); then
     zenity --error --title="Could not parse Knots signing key" \
         --text="Downloaded $KNOTS_KEY_URL but GPG could not extract a fingerprint from it.\n\nThe file may be corrupted or GitHub may have served something unexpected. Try again, or check your network." \
-        --ellipsize "$ICON" --icon-name=dialog-error
+        --ellipsize "$ICON" --icon=dialog-error
     rm -f luke-jr.asc
     exit 1
 fi
@@ -192,7 +192,7 @@ if [ "${BOT_AUTO_LATEST:-0}" != "1" ]; then
         --title="Confirm Bitcoin Knots install" \
         --text="Bitcoin Knots <b>$VER</b>\n\nSigned by Luke Dashjr (single signature required).\nKey fingerprint from $KEY_SOURCE_DISPLAY:\n$FP_DISPLAY\nProceed with download and installation?" \
         --ok-label="Install" --cancel-label="Cancel" \
-        "$ICON" --icon-name=bitcoin128; then
+        "$ICON" --icon=bitcoin128; then
         exit 1
     fi
 fi

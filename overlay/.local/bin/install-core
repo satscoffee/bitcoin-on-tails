@@ -103,7 +103,7 @@ else
         --column="Pick" --column="Version" --column="Description" \
         "${radiolist_args[@]}" \
         --width=560 --height=360 \
-        "$ICON" --icon-name=bitcoin128) || exit 1
+        "$ICON" --icon=bitcoin128) || exit 1
 fi
 
 if [ -z "$selected" ]; then
@@ -116,7 +116,7 @@ if [ "$selected" = "__custom__" ]; then
         custom=$(zenity --entry \
             --title="Custom Bitcoin Core version" \
             --text="Enter the exact Bitcoin Core version string (e.g., 27.1):" \
-            "$ICON" --icon-name=bitcoin128) || exit 1
+            "$ICON" --icon=bitcoin128) || exit 1
         # Validate basic shape first to avoid malformed URLs
         if ! [[ "$custom" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
             zenity --error --title="Invalid format" --text="Version must look like '27.1' or '27.0.1'." --ellipsize "$ICON"

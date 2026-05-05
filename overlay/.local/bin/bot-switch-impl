@@ -34,7 +34,7 @@ export DATA_DIR="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bi
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$DOTFILES/.local/share}"
 export XDG_STATE_HOME="${XDG_STATE_HOME:-$DOTFILES/.local/state}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$DOTFILES/.cache}"
-export ICON="--window-icon=$XDG_DATA_HOME/icons/bot128.png"
+export ICON="--icon=$XDG_DATA_HOME/icons/bot128.png"
 
 # shellcheck source=/dev/null
 . bitcoin-install-common --funcs-only
@@ -45,31 +45,31 @@ current="$(bot_get_installed_dist)"
 if [ -z "$current" ]; then
     zenity --error --title="No Bitcoin implementation installed" \
         --text="There is no Bitcoin Core or Bitcoin Knots install on this system yet.\n\nRun <tt>b</tt> from a terminal to install one first." \
-        --width=480 "$ICON" --icon-name=dialog-error 2>/dev/null
+        --width=480 "$ICON" --icon=dialog-error 2>/dev/null
     exit 1
 fi
 
 case "$current" in
-    core)  current_label="Bitcoin Core"  ;;
-    knots) current_label="Bitcoin Knots" ;;
+    core)         current_label="Bitcoin Core"  ;;
+    knots)        current_label="Bitcoin Knots" ;;
+    knots-bip110) current_label="Bitcoin Knots + BIP-110" ;;
     *)
         zenity --error --title="Unknown implementation" \
             --text="The dist marker at <tt>$XDG_STATE_HOME/bot/dist</tt> contains an unrecognized value: <tt>$current</tt>\n\nPlease uninstall and reinstall to recover." \
-            --width=520 "$ICON" --icon-name=dialog-error 2>/dev/null
+            --width=520 "$ICON" --icon=dialog-error 2>/dev/null
         exit 1
         ;;
 esac
 
 current_ver="$(bot_get_installed_version 2>/dev/null || echo "")"
 
-# Build the picker. Always offer: switch to the OTHER implementation, OR
-# reinstall the CURRENT implementation at a different version. Reinstall
-# is useful for patching to a newer minor (Core), pinning to a custom
-# version (Core's installer has a "__custom__" entry), or refreshing
-# Knots to whatever upstream now considers "latest".
+# Build the picker. Offer: switch to either of the OTHER two implementations,
+# OR reinstall the CURRENT implementation. All three full impls (core, knots,
+# knots-bip110) share the same on-disk chain format, so any switch is just a
+# binary swap from the user's perspective.
 explainer="<b>Current implementation: $current_label${current_ver:+ $current_ver}</b>
 
-Switching between Core and Knots — or reinstalling at a different version — only replaces the Bitcoin binaries on this USB.
+Switching implementations — or reinstalling the current one — only replaces the Bitcoin binaries on this USB.
 
 <b>Your data is preserved:</b>
   • Chain data (blocks, chainstate, indexes)
@@ -78,26 +78,41 @@ Switching between Core and Knots — or reinstalling at a different version — 
 
 <b>What does change:</b>
   • The <tt>bitcoind</tt> / <tt>bitcoin-qt</tt> binaries are replaced.
-  • The first launch after a switch may run a brief consistency check on the chain — this is normal."
+  • The first launch after a switch may run a brief consistency check on the chain — this is normal.
+  • <b>Switching to or from Knots + BIP-110 changes which transactions your node will relay and accept.</b> If BIP-110 has activated and you switch away from it, you may briefly serve blocks the wider network rejects. Only relevant once activation lands."
 
-if [ "$current" = "core" ]; then
-    other="knots";  other_label="Bitcoin Knots"
-else
-    other="core";   other_label="Bitcoin Core"
-fi
+# Build dynamic radiolist with the two non-current impls + reinstall.
+declare -A IMPL_LABELS=(
+    [core]="Bitcoin Core"
+    [knots]="Bitcoin Knots"
+    [knots-bip110]="Bitcoin Knots + BIP-110"
+)
+declare -A IMPL_NOTES=(
+    [core]="Reference implementation, multi-signer verification (3 signatures)"
+    [knots]="Luke Dashjr's fork, single-signer verification"
+    [knots-bip110]="Non-mainline soft-fork build (chain-split risk if BIP-110 activates differently)"
+)
+
+picker_args=()
+for slug in core knots knots-bip110; do
+    [ "$slug" = "$current" ] && continue
+    picker_args+=(FALSE "switch:$slug" "Switch to ${IMPL_LABELS[$slug]} — ${IMPL_NOTES[$slug]}")
+done
+picker_args+=(FALSE "reinstall" "Reinstall $current_label (lets you pick a different version)")
 
 choice=$(zenity --list --radiolist \
     --title="Change Bitcoin implementation" \
     --text="$explainer" \
     --column="Pick" --column="Action" --column="Notes" \
-    FALSE "switch"    "Switch to $other_label" \
-    FALSE "reinstall" "Reinstall $current_label (lets you pick a different version)" \
-    --width=720 --height=480 \
-    "$ICON" --icon-name=bitcoin128) || exit 0
+    "${picker_args[@]}" \
+    --width=820 --height=520 \
+    "$ICON" --icon=bitcoin128) || exit 0
 
 case "$choice" in
-    switch)
-        target="$other"; target_label="$other_label"; verb="Switch"
+    switch:*)
+        target="${choice#switch:}"
+        target_label="${IMPL_LABELS[$target]}"
+        verb="Switch"
         prompt_text="<b>Switch from $current_label to $target_label?</b>\n\nYour chain data, wallets, and settings will be preserved. Only the binaries change.\n\nThe next step will download and verify $target_label's release, then replace the $current_label binaries on your USB."
         ;;
     reinstall)
@@ -113,7 +128,7 @@ if ! zenity --question \
     --title="$verb to $target_label?" \
     --text="$prompt_text" \
     --ok-label="Continue" --cancel-label="Cancel" \
-    --width=520 "$ICON" --icon-name=bitcoin128 2>/dev/null; then
+    --width=520 "$ICON" --icon=bitcoin128 2>/dev/null; then
     exit 0
 fi
 

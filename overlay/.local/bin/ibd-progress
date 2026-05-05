@@ -14,7 +14,7 @@ export PYTHONPATH=${PYTHONPATH}:${HOME}/.local/lib/python3/site-packages
 export DOTFILES=/live/persistence/TailsData_unlocked/dotfiles
 export LOCAL_DIR=/live/persistence/TailsData_unlocked/dotfiles/.local
 export DATA_DIR=/live/persistence/TailsData_unlocked/Persistent/.bitcoin
-export ICON="--window-icon=$LOCAL_DIR/share/icons/bot128.png"
+export ICON="--icon=$LOCAL_DIR/share/icons/bot128.png"
 
 # check for environment variables
 [ "$LOCATIONS" ] || LOCATIONS=2

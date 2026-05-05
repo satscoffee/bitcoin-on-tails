@@ -15,7 +15,7 @@ DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
 INSTALLED_BOT_DIR="${INSTALLED_BOT_DIR:-$DOTFILES/.local/share/bot}"
 WAYLAND_DISPLAY=""
 ICON_FILE="$HOME/.local/share/icons/bot128.png"
-ICON_ARG="--window-icon=$ICON_FILE"
+ICON_ARG="--icon=$ICON_FILE"
 
 # bot_raise_dialog fallback
 type bot_raise_dialog >/dev/null 2>&1 || bot_raise_dialog() {
@@ -50,7 +50,7 @@ if [ ! -d "$INSTALLED_BOT_DIR/.git" ]; then
     bot_raise_dialog "Cannot check for updates"
     if command -v zenity >/dev/null 2>&1; then
         zenity --warning --title="Cannot check for updates" --text="$msg" --width=520 \
-            "$ICON_ARG" --icon-name=dialog-warning 2>/dev/null
+            "$ICON_ARG" --icon=dialog-warning 2>/dev/null
     fi
     echo "bot-check-update: $INSTALLED_BOT_DIR is not a git checkout."
     exit 1
@@ -77,7 +77,7 @@ if ! git fetch --tags --quiet "$remote" "$default_branch" 2>&1; then
     bot_raise_dialog "Update check failed"
     zenity --error --title="Update check failed" \
         --text="Could not reach <tt>$remote</tt> to check for BoT updates.\n\nThis is usually a slow or stuck Tor circuit, or no network connection.\n\nTry again in a moment, or open a terminal and run <tt>cd $INSTALLED_BOT_DIR &amp;&amp; git fetch</tt> for the raw git error." \
-        --width=520 "$ICON_ARG" --icon-name=dialog-error 2>/dev/null
+        --width=520 "$ICON_ARG" --icon=dialog-error 2>/dev/null
     exit 2
 fi
 
@@ -99,7 +99,7 @@ if [ "$behind" -eq 0 ]; then
     bot_raise_dialog "Bitcoin on Tails is up to date"
     zenity --info --title="Bitcoin on Tails is up to date" \
         --text="<b>Bitcoin on Tails is up to date.</b>\n\nInstalled: <tt>$local_ver</tt>\nLatest tag on $remote/$default_branch: <tt>$latest_tag</tt>$extra" \
-        --width=520 "$ICON_ARG" --icon-name=bot128 2>/dev/null
+        --width=520 "$ICON_ARG" --icon=bot128 2>/dev/null
     exit 0
 fi
 

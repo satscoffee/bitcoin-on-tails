@@ -1,0 +1,218 @@
+#!/bin/bash
+
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
+###############################################################################
+# install-knots-bip110: installs the BIP-110-enabled Bitcoin Knots build from
+# dathonohm's fork at github.com/dathonohm/bitcoin/releases.
+#
+# What is BIP-110: a soft-fork proposal limiting non-OP_RETURN outputs to
+# 34 bytes and OP_RETURN to 83 bytes (re-instating limits that mainline Core
+# 30 dropped). The dathonohm fork is a Knots build that enforces and
+# signals these rules. Running it means your node will reject and not relay
+# non-conforming transactions, and counts as an active signal node in
+# BIP-110 monitors.
+#
+# Trust model: GitHub user key for dathonohm, pinned against the user-
+# verified short fingerprint 2E3A66FF67F98B4F. The downstream
+# `gpg --verify SHA256SUMS.asc SHA256SUMS` is the authoritative gate; the
+# short-ID match here is a sanity check against accidentally accepting a
+# different key from GitHub or a keyserver.
+###############################################################################
+
+# Source env and helper functions
+# shellcheck source=/dev/null
+. bitcoin-install-common --funcs-only
+
+# Distribution-specific constants
+export DOMAIN="https://github.com/dathonohm/bitcoin"
+export DIST_LABEL="Bitcoin Knots + BIP-110"
+export DIST_SLUG="knots-bip110"
+export BINVERIFY_MIN_GOOD_SIGS=1
+export SINGLE_SIGNER=1
+
+# Pinned short fingerprint per user spec. Full 40-char fingerprint is verified
+# below by extracting it from the actual key and confirming the last 16 chars
+# match this constant.
+readonly BIP110_PINNED_SHORTID='2E3A66FF67F98B4F'
+readonly BIP110_KEY_URL_GITHUB='https://github.com/dathonohm.gpg'
+readonly BIP110_KEY_KEYSERVER_1='hkps://keys.openpgp.org'
+readonly BIP110_KEY_KEYSERVER_2='hkps://keyserver.ubuntu.com'
+
+readonly RELEASES_API='https://api.github.com/repos/dathonohm/bitcoin/releases/latest'
+readonly RELEASES_PAGE='https://github.com/dathonohm/bitcoin/releases'
+
+# knots_bip110_resolve_latest — quietly fetch the latest release tag.
+# Used by `install-knots-bip110 --check`. No UI, no side effects beyond
+# network. Strips the leading "v" so the value is comparable with sort -V.
+knots_bip110_resolve_latest() {
+    local body
+    body=$(curl -sL --fail --max-time 30 "$RELEASES_API" 2>/dev/null) || return 1
+    [ -n "$body" ] || return 1
+    printf '%s' "$body" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+tag = d.get("tag_name", "")
+if tag.startswith("v"):
+    tag = tag[1:]
+sys.stdout.write(tag)
+' 2>/dev/null
+}
+
+# Handle --check / --update / --uninstall before any interactive work.
+bot_dispatch_bitcoin knots-bip110 "$DIST_LABEL" "$@" || _disp=$?
+[ "${_disp:-1}" = "2" ] && exit 1
+
+printf '\033]2;Checking for latest Bitcoin Knots + BIP-110 release\a'
+pkill tca &>/dev/null
+
+# Download to Persistent Storage if setup, otherwise amnesia
+cd "$XDG_DATA_HOME/bitcoin" 2>/dev/null || cd "$HOME/.local/share/bitcoin" || exit 1
+export DOWNLOAD_DIR="$PWD"
+
+# Fetch latest release metadata from GitHub Releases API.
+release_json=$(mktemp)
+trap 'rm -f "$release_json"' EXIT
+retry_on_fail curl -sL --fail --max-time 60 -o "$release_json" "$RELEASES_API"
+
+# Parse out: tag_name, asset URLs for tarball, SHA256SUMS, SHA256SUMS.asc.
+# Use python3 (always available on Tails) so we don't add a jq dep.
+parsed=$(python3 - "$release_json" <<'PY'
+import json, sys, re
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+except Exception as e:
+    print("ERR=" + str(e))
+    sys.exit(0)
+tag = d.get("tag_name", "").lstrip("v")
+print("TAG=" + tag)
+for a in d.get("assets", []):
+    name = a.get("name", "")
+    url = a.get("browser_download_url", "")
+    if re.match(r"^bitcoin-.*-x86_64-linux-gnu\.tar\.gz$", name):
+        print("TAR_NAME=" + name)
+        print("TAR_URL=" + url)
+    elif name == "SHA256SUMS":
+        print("SIGS_URL=" + url)
+    elif name == "SHA256SUMS.asc":
+        print("SIGS_ASC_URL=" + url)
+PY
+)
+eval "$parsed"
+rm -f "$release_json"
+
+# Validate we got everything we need.
+if [ -z "${TAG:-}" ] || [ -z "${TAR_URL:-}" ] || [ -z "${SIGS_URL:-}" ]; then
+    zenity --error --title="No BIP-110 release found" \
+        --text="Could not locate a BIP-110 Knots release on:\n<tt>$RELEASES_PAGE</tt>\n\nThe GitHub Releases API returned no usable assets.\nCheck your network connection or visit the page manually." \
+        --ellipsize "$ICON"
+    exit 1
+fi
+
+VER="$TAG"
+export VER TAR_NAME TAR_URL SIGS_URL
+
+cd "$DOWNLOAD_DIR" || exit 1
+
+# Cache dathonohm's signing key in persistent storage so subsequent installs/
+# updates don't need to re-fetch from GitHub.
+: "${DOTFILES:=/live/persistence/TailsData_unlocked/dotfiles}"
+KEY_CACHE_DIR="$DOTFILES/.local/share/bitcoin/trusted-keys"
+KEY_CACHE_FILE="$KEY_CACHE_DIR/dathonohm.gpg"
+mkdir -p "$KEY_CACHE_DIR" 2>/dev/null
+
+KEY_SOURCE_DISPLAY=""
+if [ -s "$KEY_CACHE_FILE" ]; then
+    cp "$KEY_CACHE_FILE" dathonohm.asc
+    KEY_SOURCE_DISPLAY="local cache ($KEY_CACHE_FILE)"
+    printf '\033]2;Using cached dathonohm signing key...\a'
+else
+    printf '\033]2;Fetching dathonohm signing key from GitHub...\a'
+    if curl -sL --fail --max-time 30 -o dathonohm.asc "$BIP110_KEY_URL_GITHUB" \
+        && [ -s dathonohm.asc ]; then
+        KEY_SOURCE_DISPLAY="$BIP110_KEY_URL_GITHUB"
+    else
+        printf '\033]2;GitHub fetch failed; trying keyservers...\a'
+        # Keyserver fallback. Try both, take whichever returns the matching key.
+        for ks in "$BIP110_KEY_KEYSERVER_1" "$BIP110_KEY_KEYSERVER_2"; do
+            if gpg --keyserver "$ks" --recv-keys "$BIP110_PINNED_SHORTID" &>/dev/null; then
+                gpg --export --armor "$BIP110_PINNED_SHORTID" > dathonohm.asc 2>/dev/null
+                if [ -s dathonohm.asc ]; then
+                    KEY_SOURCE_DISPLAY="keyserver $ks"
+                    break
+                fi
+            fi
+        done
+    fi
+    if [ ! -s dathonohm.asc ]; then
+        zenity --error --title="Cannot fetch BIP-110 signing key" \
+            --text="Could not retrieve dathonohm's signing key from GitHub or any keyserver.\n\nTried:\n  $BIP110_KEY_URL_GITHUB\n  $BIP110_KEY_KEYSERVER_1\n  $BIP110_KEY_KEYSERVER_2\n\nCheck your network connection and try again." \
+            --ellipsize "$ICON"
+        exit 1
+    fi
+    cp dathonohm.asc "$KEY_CACHE_FILE" 2>/dev/null || true
+fi
+
+# Extract and validate fingerprint(s) from the key we just got.
+mapfile -t KEY_FINGERPRINTS < <(
+    gpg --show-keys --with-colons --with-fingerprint dathonohm.asc 2>/dev/null \
+    | awk -F: '$1=="fpr" && !seen[$10]++ {print $10}'
+)
+if ((${#KEY_FINGERPRINTS[@]} == 0)); then
+    zenity --error --title="Could not parse signing key" \
+        --text="The file fetched from $KEY_SOURCE_DISPLAY doesn't appear to be a valid PGP key (no fingerprints extractable).\n\nThe file may be corrupted or the source may have served something unexpected." \
+        --ellipsize "$ICON"
+    rm -f dathonohm.asc
+    exit 1
+fi
+
+# Sanity check: at least one fingerprint must end with the pinned short ID.
+# Short IDs aren't collision-resistant, so this is a sanity check, not the
+# trust gate — that's `gpg --verify SHA256SUMS.asc SHA256SUMS` later.
+fp_match=""
+for fp in "${KEY_FINGERPRINTS[@]}"; do
+    fp_upper="${fp^^}"
+    if [[ "$fp_upper" == *"$BIP110_PINNED_SHORTID" ]]; then
+        fp_match="$fp"
+        break
+    fi
+done
+
+if [ -z "$fp_match" ]; then
+    zenity --error --title="Fingerprint mismatch" \
+        --text="The key fetched from <tt>$KEY_SOURCE_DISPLAY</tt> does NOT match the pinned BIP-110 short fingerprint:\n\n<tt>0x$BIP110_PINNED_SHORTID</tt>\n\nReceived fingerprints:\n$(printf '<tt>%s</tt>\n' "${KEY_FINGERPRINTS[@]}")\n\nRefusing to proceed. The signing key may have rotated, or you may be looking at a different account's key.\n\nIf dathonohm has rotated keys, you'll need to update the BoT pinned ID and retry." \
+        --width=560 "$ICON"
+    rm -f dathonohm.asc "$KEY_CACHE_FILE"
+    exit 1
+fi
+
+# Import the key into the keyring so gpg --verify can use it.
+gpg --import dathonohm.asc &>/dev/null
+rm -f dathonohm.asc
+
+# Populate builder-keys with the matched fingerprint(s).
+: > builder-keys
+for fp in "${KEY_FINGERPRINTS[@]}"; do
+    printf '      Key fingerprint = %s\n' "$fp" >> builder-keys
+done
+
+# Confirm with the user. Show the FULL fingerprint so they can eyeball it
+# against any independent source they trust. Skip in --update mode.
+if [ "${BOT_AUTO_LATEST:-0}" != "1" ]; then
+    fp_display=$(printf '<tt>%s</tt>\n' "${KEY_FINGERPRINTS[@]}")
+    if ! zenity --question \
+        --title="Confirm Bitcoin Knots + BIP-110 install" \
+        --text="<b>Bitcoin Knots + BIP-110 $VER</b>\n\nSigned by <tt>dathonohm</tt> (single signature required).\nKey source: $KEY_SOURCE_DISPLAY\nMatched short ID: <tt>0x$BIP110_PINNED_SHORTID</tt>\nFull fingerprint(s):\n$fp_display\n\n<b>BIP-110 is a soft-fork proposal</b> that re-imposes data limits on Bitcoin transactions (non-OP_RETURN outputs ≤ 34 bytes, OP_RETURN ≤ 83 bytes). Running this build means your node enforces and signals support for those rules.\n\nThis is a non-mainline build. If BIP-110 activates differently than your node enforces, you could end up on a chain split. Read up on the proposal at <a href=\"https://bip110.org\">bip110.org</a> first if you haven't.\n\nProceed?" \
+        --ok-label="Install" --cancel-label="Cancel" --width=600 \
+        "$ICON" --icon=bitcoin128; then
+        exit 1
+    fi
+fi
+
+# Hand off to the shared install flow.
+# shellcheck source=/dev/null
+. bitcoin-install-common

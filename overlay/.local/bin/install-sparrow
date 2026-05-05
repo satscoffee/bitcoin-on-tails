@@ -59,7 +59,7 @@ esc() { sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 bail() {
     local title="$1"; shift
     zenity --error --title="$title" --text="$*" --ellipsize \
-        "$ICON" --icon-name=dialog-error
+        "$ICON" --icon=dialog-error
     exit 1
 }
 
@@ -96,7 +96,7 @@ sparrow_uninstall() {
     if ! [ -x "$DOTFILES/.local/bin/Sparrow" ]; then
         zenity --info --title="Sparrow not installed" \
             --text="Sparrow Wallet does not appear to be installed.\n\nNothing to uninstall." \
-            --ellipsize "$ICON" --icon-name=Sparrow 2>/dev/null \
+            --ellipsize "$ICON" --icon=Sparrow 2>/dev/null \
             || echo "Sparrow Wallet is not installed."
         return 0
     fi
@@ -104,7 +104,7 @@ sparrow_uninstall() {
     if ! zenity --question --title="Uninstall Sparrow Wallet?" \
         --text="This will remove the Sparrow Wallet program from your Persistent Storage.\n\nYou will be asked separately whether to keep your wallets and settings.\n\nProceed?" \
         --ok-label="Continue" --cancel-label="Cancel" \
-        --width=440 "$ICON" --icon-name=Sparrow 2>/dev/null; then
+        --width=440 "$ICON" --icon=Sparrow 2>/dev/null; then
         return 0
     fi
 
@@ -114,14 +114,14 @@ sparrow_uninstall() {
     if zenity --question --title="Delete Sparrow wallets?" \
         --text="Delete your Sparrow wallet files (<tt>.wallet</tt>)?\n\nLocation: <tt>$PERSISTENT/.sparrow/wallets/</tt>\n\n<b>This is destructive — wallets contain your private keys.</b> Only do this if you have already backed up the wallets elsewhere.\n\n<b>Default: keep.</b>" \
         --ok-label="Delete wallets" --cancel-label="Keep" --default-cancel \
-        --width=440 "$ICON" --icon-name=dialog-warning 2>/dev/null; then
+        --width=440 "$ICON" --icon=dialog-warning 2>/dev/null; then
         del_wallets=1
     fi
 
     if zenity --question --title="Delete Sparrow settings?" \
         --text="Delete Sparrow's settings and preferences?\n\nLocation: <tt>$PERSISTENT/.sparrow/config</tt> and related files\n\n<b>Default: keep.</b>" \
         --ok-label="Delete settings" --cancel-label="Keep" --default-cancel \
-        --width=440 "$ICON" --icon-name=preferences-system 2>/dev/null; then
+        --width=440 "$ICON" --icon=preferences-system 2>/dev/null; then
         del_settings=1
     fi
 
@@ -175,7 +175,7 @@ sparrow_uninstall() {
 
     zenity --info --title="Sparrow uninstalled" \
         --text="Sparrow Wallet has been removed.\n\nKept: $( ((del_wallets)) || echo "wallets, ")$( ((del_settings)) || echo "settings")$( ((del_wallets && del_settings)) && echo "(nothing)" )" \
-        --ellipsize "$ICON" --icon-name=dialog-information 2>/dev/null \
+        --ellipsize "$ICON" --icon=dialog-information 2>/dev/null \
         || echo "Sparrow Wallet uninstalled."
 }
 
@@ -339,7 +339,7 @@ if [ "${BOT_AUTO_LATEST:-0}" != "1" ]; then
         --title="Confirm Sparrow Wallet install" \
         --text="Sparrow Wallet <b>$VER</b>\n\nSigned by Craig Raw (single signature required).\nKey fingerprint from $KEY_SOURCE_DISPLAY:\n$FP_DISPLAY\nProceed with download and installation?" \
         --ok-label="Install" --cancel-label="Cancel" \
-        "$ICON" --icon-name=bitcoin128 || exit 1
+        "$ICON" --icon=bitcoin128 || exit 1
 fi
 
 ###############################################################################
@@ -615,11 +615,11 @@ fi
 if ((already_installed)); then
     zenity --info --title="Sparrow Wallet updated" \
         --text="Upgraded to Sparrow Wallet $VER." \
-        --icon-name=Sparrow "$ICON" &
+        --icon=Sparrow "$ICON" &
 else
     zenity --info --title="Sparrow Wallet installed" \
         --text="Sparrow Wallet $VER has been installed." \
-        --icon-name=Sparrow "$ICON" &
+        --icon=Sparrow "$ICON" &
 fi
 
 gtk-launch sparrow-Sparrow 2>/dev/null || "$SPARROW_BIN" -d "$PERSISTENT/.sparrow" &

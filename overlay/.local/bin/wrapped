@@ -6,7 +6,7 @@
 # wraps Bitcoin executables with datadir symlinks, favorites, prune, dbcache.
 ###############################################################################
 export WAYLAND_DISPLAY=""
-export ICON="--window-icon=$HOME/.local/share/icons/bot128.png"
+export ICON="--icon=$HOME/.local/share/icons/bot128.png"
 export DATA_DIR=/live/persistence/TailsData_unlocked/Persistent/.bitcoin
 
 # shellcheck disable=SC1090

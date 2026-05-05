@@ -7,9 +7,9 @@
 # and launches install-core or install-knots.
 ###############################################################################
 
-export VERSION='v0.9.1-alpha'
+export VERSION='v0.9.2-alpha'
 export WAYLAND_DISPLAY="" # Needed for zenity dialogs to have window icon
-export ICON="--window-icon=$HOME/.local/share/icons/bot128.png"
+export ICON="--icon=$HOME/.local/share/icons/bot128.png"
 export DOTFILES='/live/persistence/TailsData_unlocked/dotfiles'
 readonly SECURITY_IN_A_BOX_URL="https://securityinabox.org/en/"
 BOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -95,9 +95,10 @@ elif [ "$1" == "--status" ]; then
   if [ -s "$marker" ]; then
       dist="$(head -1 "$marker" | tr -d '[:space:]')"
       case "$dist" in
-          core)  echo "Implementation: Bitcoin Core"  ;;
-          knots) echo "Implementation: Bitcoin Knots" ;;
-          *)     echo "Implementation: $dist (unknown marker value)" ;;
+          core)         echo "Implementation: Bitcoin Core"  ;;
+          knots)        echo "Implementation: Bitcoin Knots" ;;
+          knots-bip110) echo "Implementation: Bitcoin Knots + BIP-110 (signaling)" ;;
+          *)            echo "Implementation: $dist (unknown marker value)" ;;
       esac
   elif command -v bitcoind >/dev/null 2>&1; then
       if bitcoind --version 2>/dev/null | grep -qi knots; then
@@ -167,7 +168,7 @@ elif [ "$1" == "--check" ] || [ "$1" == "--update" ] || [ "$1" == "--uninstall" 
     fi
   fi
   case "$dist" in
-    core|knots)
+    core|knots|knots-bip110)
       # Resolve the installer absolutely so a still-broken PATH gives a
       # clearer error than "command not found" if something else is wrong.
       installer="$(command -v "install-$dist" 2>/dev/null \
@@ -291,7 +292,7 @@ else
         FALSE "menu"      "Sync scripts, then open the BoT control panel" \
         FALSE "reinstall" "Run the full install flow again (re-downloads Bitcoin)" \
         --width=720 --height=320 \
-        "$ICON" --icon-name=bitcoin128) || exit 0
+        "$ICON" --icon=bitcoin128) || exit 0
     case "$dev_choice" in
       refresh|menu)
         # shellcheck disable=SC1091
@@ -314,7 +315,7 @@ else
         zenity --info --title="Scripts refreshed" \
             --width=560 \
             --text="BoT scripts have been synced into Persistent Storage at <b>$VERSION</b>.\n\nFrom any terminal you can now test:\n<tt>b --check</tt>, <tt>b --update</tt>, <tt>b --uninstall</tt>, or <tt>bot-menu</tt>.\n\nThe BoT control panel will open next." \
-            "$ICON" --icon-name=bitcoin128
+            "$ICON" --icon=bitcoin128
         exec bot-menu
         ;;
       reinstall)
@@ -363,16 +364,18 @@ else
   fi
   if [ -z "$1" ]; then # Install/Update if ran without a parameter
     # Ask which Bitcoin implementation to install. No default — user must choose.
+    # Three options presented as equals: Core, Knots, Knots+BIP-110.
     bot_raise_dialog "Choose a Bitcoin implementation"
     bitcoin_impl=$(zenity --list --radiolist \
         --title="Choose a Bitcoin implementation" \
-        --text="<b>No default selected — please pick one.</b>\n\nBoth are full-node implementations of the Bitcoin protocol." \
+        --text="<b>No default selected — please pick one.</b>\n\nAll three are full-node implementations of the Bitcoin protocol." \
         --column="Pick" --column="Implementation" --column="Notes" \
-        FALSE "core"  "Bitcoin Core — reference implementation, multi-signer verification (3 signatures)" \
-        FALSE "knots" "Bitcoin Knots — Luke Dashjr's fork, single-signer verification" \
-        --width=720 --height=380 \
-        "$ICON" --icon-name=bitcoin128) || {
-          zenity --error --title="No implementation selected" --text="You must choose Bitcoin Core or Bitcoin Knots to continue." --ellipsize "$ICON"
+        FALSE "core"         "Bitcoin Core — reference implementation, multi-signer verification (3 signatures)" \
+        FALSE "knots"        "Bitcoin Knots — Luke Dashjr's fork, single-signer verification" \
+        FALSE "knots-bip110" "Bitcoin Knots + BIP-110 — non-mainline soft-fork build (chain-split risk if you don't know what this is)" \
+        --width=820 --height=420 \
+        "$ICON" --icon=bitcoin128) || {
+          zenity --error --title="No implementation selected" --text="You must choose Bitcoin Core, Bitcoin Knots, or Bitcoin Knots + BIP-110 to continue." --ellipsize "$ICON"
           exit 1
         }
     case "$bitcoin_impl" in
@@ -384,26 +387,30 @@ else
         # shellcheck disable=SC1091
         . install-knots
         ;;
+      knots-bip110)
+        # shellcheck disable=SC1091
+        . install-knots-bip110
+        ;;
       *)
-        zenity --error --title="No implementation selected" --text="You must choose Bitcoin Core or Bitcoin Knots to continue." --ellipsize "$ICON"
+        zenity --error --title="No implementation selected" --text="You must choose Bitcoin Core, Bitcoin Knots, or Bitcoin Knots + BIP-110 to continue." --ellipsize "$ICON"
         exit 1
         ;;
     esac
     wait
     # Display info about IBD, keeping Tails private and extra reading material
-    zenity --info --title='Setup almost complete' --icon-name=bot128 "$ICON" --text='The Bitcoin blockchain has begun syncing automatically.\nMake sure no one messes with the PC.\n\nTo lock the screen for privacy, press ❖+L (⊞+L or ⌘+L)\n\nIt is safer to exit Bitcoin (Ctrl+Q), <a href="https://tails.net/doc/first_steps/shutdown/index.en.html">shutdown Tails</a> and take your Bitcoin on Tails USB stick with you or store it in a safe place than leave Tails running unattended where people you distrust could tamper with it.\n\nIf you want to learn more about using Tails safely read the <a href="https://tails.net/doc/index.en.html">documentation</a>.\n\nAnother excellent read to improve your physical and digital security tactics is the <a href="'"$SECURITY_IN_A_BOX_URL"'">Security in-a-Box</a> website.'
+    zenity --info --title='Setup almost complete' --icon=bot128 "$ICON" --text='The Bitcoin blockchain has begun syncing automatically.\nMake sure no one messes with the PC.\n\nTo lock the screen for privacy, press ❖+L (⊞+L or ⌘+L)\n\nIt is safer to exit Bitcoin (Ctrl+Q), <a href="https://tails.net/doc/first_steps/shutdown/index.en.html">shutdown Tails</a> and take your Bitcoin on Tails USB stick with you or store it in a safe place than leave Tails running unattended where people you distrust could tamper with it.\n\nIf you want to learn more about using Tails safely read the <a href="https://tails.net/doc/index.en.html">documentation</a>.\n\nAnother excellent read to improve your physical and digital security tactics is the <a href="'"$SECURITY_IN_A_BOX_URL"'">Security in-a-Box</a> website.'
     # Offer Sparrow Wallet as an optional add-on. Sparrow connects to the local
     # Bitcoin Core/Knots node over localhost RPC for maximum privacy.
     if zenity --question \
         --title='Install Sparrow Wallet?' \
         --text='<b>Sparrow Wallet</b> is a Bitcoin wallet focused on security and privacy. It can connect to your Bitcoin node so your wallet queries never leak to third-party servers.\n\nInstall Sparrow Wallet now?\n\n(You can also install it later by opening a terminal and running <tt>install-sparrow</tt>.)' \
         --ok-label='Yes, install Sparrow' --cancel-label='Not now' \
-        "$ICON" --icon-name=bitcoin128; then
+        "$ICON" --icon=bitcoin128; then
         install-sparrow || zenity --warning --title="Sparrow install did not complete" \
             --text="Sparrow Wallet installation was cancelled or failed. You can retry later by running <tt>install-sparrow</tt> from a terminal." \
             --ellipsize "$ICON"
     fi
-    zenity --info --title="Bitcoin on Tails install successful" --text="Bitcoin on Tails $VERSION has been installed." "$ICON" --icon-name=bot128
+    zenity --info --title="Bitcoin on Tails install successful" --text="Bitcoin on Tails $VERSION has been installed." "$ICON" --icon=bot128
     # Exit by killing controlling terminal
     echo "Bitcoin on Tails installation complete! 
 
@@ -419,7 +426,7 @@ Closing terminal window..."
     PARENT_PID=$(ps -o ppid= -p $$)
     kill -9 "$PARENT_PID"
   else
-    zenity --info --title="Bitcoin on Tails update successful" --text="Bitcoin on Tails has been updated to $VERSION." "$ICON" --icon-name=bot128
+    zenity --info --title="Bitcoin on Tails update successful" --text="Bitcoin on Tails has been updated to $VERSION." "$ICON" --icon=bot128
   fi
   exit 0
 fi

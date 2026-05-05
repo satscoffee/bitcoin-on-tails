@@ -22,7 +22,7 @@ export WAYLAND_DISPLAY=""
 export DOTFILES="${DOTFILES:-/live/persistence/TailsData_unlocked/dotfiles}"
 export DATA_DIR="${DATA_DIR:-/live/persistence/TailsData_unlocked/Persistent/.bitcoin}"
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$DOTFILES/.local/share}"
-export ICON="--window-icon=$XDG_DATA_HOME/icons/bot128.png"
+export ICON="--icon=$XDG_DATA_HOME/icons/bot128.png"
 
 # shellcheck source=/dev/null
 . bitcoin-install-common --funcs-only
@@ -31,7 +31,7 @@ settings="$DATA_DIR/settings.json"
 if [ ! -f "$settings" ]; then
     zenity --error --title="Bitcoin not installed" \
         --text="settings.json was not found at:\n<tt>$settings</tt>\n\nInstall Bitcoin on Tails first." \
-        --width=480 "$ICON" --icon-name=dialog-error 2>/dev/null
+        --width=480 "$ICON" --icon=dialog-error 2>/dev/null
     exit 1
 fi
 
@@ -63,7 +63,7 @@ fi
 if [ "$new_mode" = "$current_mode" ]; then
     zenity --info --title="No change" \
         --text="Network setting is already <b>$new_mode</b>. Nothing to do." \
-        "$ICON" --icon-name=bitcoin128 2>/dev/null
+        "$ICON" --icon=bitcoin128 2>/dev/null
     exit 0
 fi
 
@@ -94,7 +94,7 @@ then
     rm -f "$tmp"
     zenity --error --title="Write failed" \
         --text="Could not update settings.json. No changes were made." \
-        "$ICON" --icon-name=dialog-error 2>/dev/null
+        "$ICON" --icon=dialog-error 2>/dev/null
     exit 1
 fi
 mv "$tmp" "$settings"
@@ -103,7 +103,7 @@ mv "$tmp" "$settings"
 if pgrep -x bitcoin-qt >/dev/null 2>&1 || pgrep -x bitcoind >/dev/null 2>&1; then
     zenity --info --title="Restart required" \
         --text="Bitcoin is running. BoT will stop it now so the new network setting takes effect on the next launch." \
-        --width=480 "$ICON" --icon-name=bitcoin128 2>/dev/null
+        --width=480 "$ICON" --icon=bitcoin128 2>/dev/null
     stop-btc 2>/dev/null || true
 fi
 
@@ -116,6 +116,6 @@ esac
 
 zenity --info --title="Network setting updated" \
     --text="Bitcoin network mode is now: <b>$summary</b>.\n\nLaunch Bitcoin from your Apps menu to start with the new setting." \
-    --width=480 "$ICON" --icon-name=bitcoin128 2>/dev/null
+    --width=480 "$ICON" --icon=bitcoin128 2>/dev/null
 
 exit 0

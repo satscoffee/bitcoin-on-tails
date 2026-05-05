@@ -51,7 +51,7 @@ icon_args=()
         --title="Stopping $label" \
         --text="Waiting for $label to finish writing to disk and shut down.\n\nThis can take 30 seconds to a few minutes if the chain is large. Please don't force-quit." \
         --pulsate --auto-close --no-cancel \
-        "${icon_args[@]}" --icon-name=bitcoin128 \
+        "${icon_args[@]}" --icon=bitcoin128 \
         2>/dev/null &
 zen_pid=$!
 

@@ -23,7 +23,7 @@ export XDG_DATA_HOME="$DOTFILES/.local/share"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$DOTFILES/.cache}"
 export XDG_STATE_HOME="${XDG_STATE_HOME:-$DOTFILES/.local/state}"
 export ICON_FILE="$XDG_DATA_HOME/icons/bot128.png"
-export ICON_ARG="--window-icon=$ICON_FILE"
+export ICON_ARG="--icon=$ICON_FILE"
 
 # .desktop launchers (Apps menu) do not source ~/.profile, so PATH may be
 # missing ~/.local/bin and $DOTFILES/.local/bin. Without those on PATH every
@@ -102,9 +102,18 @@ get_bot_version() {
 }
 
 get_bitcoin_impl() {
-    # Knots ships its own bitcoind; both report version via --version.
-    # We detect by checking for the Knots-specific string in the binary's version.
+    # Knots/Core both report version via --version. We detect by checking for
+    # the Knots-specific string in the binary's version. The BIP-110 fork is
+    # also a Knots build, so binary inspection alone can't tell us "this is
+    # the BIP-110 build vs plain Knots" — the dist marker carries that.
     if command -v bitcoind >/dev/null 2>&1; then
+        local marker_dist
+        if [ -s "$DIST_MARKER" ]; then
+            marker_dist="$(head -1 "$DIST_MARKER" | tr -d '[:space:]')"
+        fi
+        case "$marker_dist" in
+            knots-bip110) echo "Bitcoin Knots + BIP-110" ; return ;;
+        esac
         if bitcoind --version 2>/dev/null | grep -qi knots; then
             echo "Bitcoin Knots"
         else
@@ -276,23 +285,52 @@ build_status_tab() {
     # pops a zenity dialog with the result.
     local cmd_bot_check_update
     cmd_bot_check_update="$(mk_action 'BoT — checking for updates' 'bot-check-update')"
-    yad --plug="$key" --tabnum=1 \
-        --form --columns=1 \
-        --field="<b>Bitcoin on Tails</b>:LBL" "" \
-        --field="Version:RO" "$(get_bot_version)" \
-        --field="Check for BoT updates:FBTN" "$cmd_bot_check_update" \
-        --field="<b>Node</b>:LBL" "" \
-        --field="Implementation:RO" "$(get_bitcoin_impl)" \
-        --field="Version:RO" "$(get_bitcoin_version)" \
-        --field="Status:RO" "$(get_sync_status)" \
-        --field="Peers:RO" "$(get_peer_count)" \
-        --field="Updates:RO" "${btc_update:-Click \"Check for updates\" on the Bitcoin tab.}" \
-        --field="<b>Storage</b>:LBL" "" \
-        --field="Disk free:RO" "$(get_disk_free)" \
-        --field="Prune setting:RO" "$(get_prune_setting)" \
-        --field="<b>Wallet</b>:LBL" "" \
-        --field="Sparrow:RO" "$(get_sparrow_version)" \
-        --field="Updates:RO" "${sparrow_update:-Click \"Check for updates\" on the Sparrow tab.}" &
+    # Signaling line — surfaces the active soft-fork posture if non-default.
+    # Only shown when the install marker says knots-bip110; otherwise the
+    # field is omitted (yad just leaves it out, no empty row).
+    local signaling=""
+    if [ "$dist" = "knots-bip110" ]; then
+        signaling="BIP-110 (rejecting non-OP_RETURN outputs >34 bytes / OP_RETURN >83 bytes)"
+    fi
+
+    if [ -n "$signaling" ]; then
+        yad --plug="$key" --tabnum=1 \
+            --form --columns=1 \
+            --field="<b>Bitcoin on Tails</b>:LBL" "" \
+            --field="Version:RO" "$(get_bot_version)" \
+            --field="Check for BoT updates:FBTN" "$cmd_bot_check_update" \
+            --field="<b>Node</b>:LBL" "" \
+            --field="Implementation:RO" "$(get_bitcoin_impl)" \
+            --field="Version:RO" "$(get_bitcoin_version)" \
+            --field="Signaling:RO" "$signaling" \
+            --field="Status:RO" "$(get_sync_status)" \
+            --field="Peers:RO" "$(get_peer_count)" \
+            --field="Updates:RO" "${btc_update:-Click \"Check for updates\" on the Bitcoin tab.}" \
+            --field="<b>Storage</b>:LBL" "" \
+            --field="Disk free:RO" "$(get_disk_free)" \
+            --field="Prune setting:RO" "$(get_prune_setting)" \
+            --field="<b>Wallet</b>:LBL" "" \
+            --field="Sparrow:RO" "$(get_sparrow_version)" \
+            --field="Updates:RO" "${sparrow_update:-Click \"Check for updates\" on the Sparrow tab.}" &
+    else
+        yad --plug="$key" --tabnum=1 \
+            --form --columns=1 \
+            --field="<b>Bitcoin on Tails</b>:LBL" "" \
+            --field="Version:RO" "$(get_bot_version)" \
+            --field="Check for BoT updates:FBTN" "$cmd_bot_check_update" \
+            --field="<b>Node</b>:LBL" "" \
+            --field="Implementation:RO" "$(get_bitcoin_impl)" \
+            --field="Version:RO" "$(get_bitcoin_version)" \
+            --field="Status:RO" "$(get_sync_status)" \
+            --field="Peers:RO" "$(get_peer_count)" \
+            --field="Updates:RO" "${btc_update:-Click \"Check for updates\" on the Bitcoin tab.}" \
+            --field="<b>Storage</b>:LBL" "" \
+            --field="Disk free:RO" "$(get_disk_free)" \
+            --field="Prune setting:RO" "$(get_prune_setting)" \
+            --field="<b>Wallet</b>:LBL" "" \
+            --field="Sparrow:RO" "$(get_sparrow_version)" \
+            --field="Updates:RO" "${sparrow_update:-Click \"Check for updates\" on the Sparrow tab.}" &
+    fi
 }
 
 # Action-button helpers. yad FBTN runs the command through /bin/sh -c.
@@ -331,10 +369,11 @@ build_bitcoin_tab() {
     # --check has populated the KV cache).
     if [ -z "$label" ]; then
         case "$dist" in
-            core)  label="Bitcoin Core"  ;;
-            knots) label="Bitcoin Knots" ;;
-            "")    label="Not installed yet" ;;
-            *)     label="$dist" ;;
+            core)         label="Bitcoin Core"  ;;
+            knots)        label="Bitcoin Knots" ;;
+            knots-bip110) label="Bitcoin Knots + BIP-110" ;;
+            "")           label="Not installed yet" ;;
+            *)            label="$dist" ;;
         esac
     fi
     if [ -z "$iv" ] && [ -n "$dist" ]; then
