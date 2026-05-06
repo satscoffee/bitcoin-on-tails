@@ -152,11 +152,19 @@ PY
     z_info --title="txindex enabled — reindex required" \
         --text="<b>txindex=1 has been added to your Bitcoin settings.</b>\n\nBitcoin will now restart and reindex the chain.  This is a <b>one-time operation</b> that takes several hours on a USB stick.\n\nYou can continue using Tails normally — Bitcoin syncs in the background.\n\nThe Inspector will be available once reindexing completes."
 
-    # Restart bitcoind so it picks up txindex=1 and starts reindexing.
+    # Restart so it picks up txindex=1 and starts reindexing.
+    # Prefer bitcoin-qt (GUI, minimized) so the user has a visible window.
+    # Fall back to bitcoind daemon-only if bitcoin-qt is not on PATH.
+    # NOTE: `wrapped` always exits 0 (it backgrounds the real process with &),
+    # so the old `wrapped bitcoind ... || wrapped bitcoin-qt ...` chain was
+    # broken — bitcoind always "succeeded", bitcoin-qt never ran.
     stop-btc 2>/dev/null || true
     sleep 2
-    wrapped bitcoind -reindex -daemon 2>/dev/null || \
-        wrapped bitcoin-qt -reindex -min 2>/dev/null &
+    if command -v bitcoin-qt >/dev/null 2>&1; then
+        wrapped bitcoin-qt -reindex -min &
+    else
+        wrapped bitcoind -reindex -daemon &
+    fi
     exit 0
 }
 
