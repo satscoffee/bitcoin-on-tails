@@ -954,15 +954,21 @@ else
     fi
 
     mkdir -p "$DATA_DIR"/{wallets,blocks}
-    # Make wallets writable in case a previous install left it chmod -w'd
-    # below. Without this, the `ln` calls fail to create their backup file
-    # and abort with "Permission denied".
-    chmod +w "$DATA_DIR/wallets" 2>/dev/null || true
-    # Drop `-b` (backup) from these ln invocations: with --force we don't
-    # need a backup of the previous symlink, and -b creating a `.~` file in
-    # a chmod'd-readonly dir was the actual cause of the permission errors.
-    ln --symbolic --force /media/"$USER" "$DATA_DIR/wallets" 2>/dev/null || true
-    chmod -w "$DATA_DIR/wallets"  # TODO: this can be deleted when panic mode is added
+    # Recover from any prior install that replaced wallets/ with a /media
+    # symlink and chmod -w'd it (BoT pre-v0.10.7 behavior). If wallets/ is
+    # currently a symlink, remove it and recreate as a real directory so
+    # Bitcoin Core's createwallet RPC (used by Sparrow) can write there.
+    if [ -L "$DATA_DIR/wallets" ]; then
+        rm -f "$DATA_DIR/wallets"
+        mkdir -p "$DATA_DIR/wallets"
+    fi
+    chmod u+w "$DATA_DIR/wallets" 2>/dev/null || true
+    # NB: previous BoT versions (≤ v0.10.6) replaced wallets/ with a symlink
+    # to /media/$USER and chmod -w'd it, intending to surface mounted USB
+    # sticks as candidate wallet sources. That broke Bitcoin Core / Sparrow's
+    # ability to create new wallets (cormorant etc.). External wallets are
+    # better loaded by navigating to /media/$USER directly from Bitcoin Core /
+    # Sparrow's file pickers.
     ln --symbolic --force {"$HOME"/.bitcoin,$DATA_DIR}/debug.log 2>/dev/null || true
     ln --symbolic --force $DOTFILES/.bitcoin/{README.md,bitcoin.conf} $DATA_DIR 2>/dev/null || true
     # Calculate space available for block file storage.
