@@ -315,7 +315,12 @@ else
             --width=560 \
             --text="BoT scripts have been synced into Persistent Storage at <b>$VERSION</b>.\n\nFrom any terminal you can now test:\n<tt>b --check</tt>, <tt>b --update</tt>, <tt>b --uninstall</tt>, or <tt>bot-menu</tt>.\n\nThe BoT control panel will open next." \
             "$ICON" --icon=bitcoin128
-        exec bot-menu
+        # Launch bot-menu detached so this terminal closes cleanly.
+        # `exec bot-menu` kept the terminal open while the menu ran.
+        # disown removes it from the job table so it survives terminal exit.
+        bot-menu &
+        disown $!
+        exit 0
         ;;
       reinstall)
         # Fall through to the standard first-install flow below.

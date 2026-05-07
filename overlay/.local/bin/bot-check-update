@@ -131,12 +131,12 @@ yad --form --columns=1 --width=640 --height=460 \
     --field="Latest published tag:RO"    "$latest_tag" \
     --field="Commits behind $remote/$default_branch:RO" "$behind" \
     --field=":LBL" "Pick how you want to update. BoT will not update automatically — you have to choose." \
-    --field="Auto-update now (recommended):FBTN" "$cmd_auto_update" \
+    --field="Upgrade:FBTN" "$cmd_auto_update" \
     --field="<b>Or copy and paste one of these instead:</b>:LBL" "" \
-    --field="Fresh clone (replaces ~/bot):RO" "$manual_cmd_clone" \
-    --field="In-place pull (working tree):RO" "$manual_cmd_pull" \
-    --field="Verify tag signature first:RO"   "$manual_cmd_verify" \
-    --field=":LBL" "Tip: click into a field above and press Ctrl+C to copy it." \
+    --field="Fresh clone (replaces ~/bot):" "$manual_cmd_clone" \
+    --field="In-place pull (working tree):" "$manual_cmd_pull" \
+    --field="Verify tag signature first:"   "$manual_cmd_verify" \
+    --field=":LBL" "Tip: click a field above, Ctrl+A to select all, then Ctrl+C to copy." \
     --button="gtk-close:0" \
     "$ICON_ARG"
 
