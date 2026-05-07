@@ -76,11 +76,11 @@ echo
 
 # --- Fetch ------------------------------------------------------------------
 
-if ! git fetch --tags --quiet "$remote" "$default_branch" 2>&1; then
+if ! timeout 30 git fetch --tags "$remote" "$default_branch" 2>&1; then
     bot_raise_dialog "Update check failed"
     zenity --error --title="Update check failed" \
-        --text="Could not reach <tt>$remote</tt> to check for BoT updates.\n\nThis is usually a slow or stuck Tor circuit, or no network connection.\n\nTry again in a moment, or open a terminal and run <tt>cd $INSTALLED_BOT_DIR &amp;&amp; git fetch</tt> for the raw git error." \
-        --width=520 "$ICON_ARG" --icon=dialog-error 2>/dev/null
+        --text="Could not reach GitHub to check for BoT updates.\n\nThis is usually a slow or stuck Tor circuit. Try:\n\n  1. Wait a moment and click <b>Check for Updates</b> again\n  2. Or update manually — open a terminal and run:\n\n<tt>rm -rf ~/bot \&amp;\&amp; git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot \&amp;\&amp; ~/bot/b</tt>\n\n     Then pick <b>refresh</b> to apply the latest scripts." \
+        --width=560 "$ICON_ARG" --icon=dialog-error 2>/dev/null
     exit 2
 fi
 
