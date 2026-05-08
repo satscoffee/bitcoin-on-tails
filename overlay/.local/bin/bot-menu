@@ -290,6 +290,23 @@ build_status_tab() {
     # a terminal so the user sees git fetch's progress; the script itself
     # pops a zenity dialog with the result.
     local cmd_bot_check_update
+
+    # Pre-compute sync status once; detect IBD < 95% to show drop-caches tip.
+    local sync_status ibd_fields=()
+    sync_status="$(get_sync_status)"
+    if [[ "$sync_status" == *"Initial sync"* ]]; then
+        local ibd_pct
+        ibd_pct=$(echo "$sync_status" | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        if awk -v p="${ibd_pct:-0}" 'BEGIN{exit !(p < 95)}'; then
+            local cmd_drop_caches
+            cmd_drop_caches="$(mk_action 'Free memory cache' \
+                'sudo sync && echo 3 | sudo tee /proc/sys/vm/drop_caches')"
+            ibd_fields=(
+                "--field=IBD tip — free memory cache if slowing down:LBL" ""
+                "--field=Free memory cache:FBTN" "$cmd_drop_caches"
+            )
+        fi
+    fi
     cmd_bot_check_update="$(mk_action 'BoT — checking for updates' 'bot-check-update')"
     # Signaling line — surfaces the active soft-fork posture if non-default.
     # Only shown when the install marker says knots-bip110; otherwise the
@@ -309,7 +326,8 @@ build_status_tab() {
             --field="Implementation:RO" "$(get_bitcoin_impl)" \
             --field="Version:RO" "$(get_bitcoin_version)" \
             --field="Signaling:RO" "$signaling" \
-            --field="Status:RO" "$(get_sync_status)" \
+            --field="Status:RO" "$sync_status" \
+            "${ibd_fields[@]}" \
             --field="Peers:RO" "$(get_peer_count)" \
             --field="Updates:RO" "${btc_update:-Click \"Check for updates\" on the Bitcoin tab.}" \
             --field="<b>Storage</b>:LBL" "" \
@@ -327,7 +345,8 @@ build_status_tab() {
             --field="<b>Node</b>:LBL" "" \
             --field="Implementation:RO" "$(get_bitcoin_impl)" \
             --field="Version:RO" "$(get_bitcoin_version)" \
-            --field="Status:RO" "$(get_sync_status)" \
+            --field="Status:RO" "$sync_status" \
+            "${ibd_fields[@]}" \
             --field="Peers:RO" "$(get_peer_count)" \
             --field="Updates:RO" "${btc_update:-Click \"Check for updates\" on the Bitcoin tab.}" \
             --field="<b>Storage</b>:LBL" "" \
