@@ -172,11 +172,22 @@ PY
 # Transaction fetch + parse
 ###############################################################################
 
-# Fetch a raw transaction (verbose) from the node.
-# Prints JSON to stdout; returns non-zero on failure.
+# Fetch a transaction (verbose) from the node using gettransaction.
+# Works for wallet transactions without requiring txindex.
+# Normalizes output so vin/vout/blockheight/blocktime are at the top level
+# (same shape the parser expects from getrawtransaction verbose).
 fetch_tx() {
     local txid="$1"
-    bcli getrawtransaction "$txid" true 2>/dev/null
+    local raw
+    raw=$(bcli gettransaction "$txid" true true 2>/dev/null) || return 1
+    echo "$raw" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+out = d.get('decoded', {})
+out['blockheight'] = d.get('blockheight', 0)
+out['blocktime']   = d.get('blocktime', 0)
+print(json.dumps(out))
+" 2>/dev/null
 }
 
 # Given a txid and vout index, fetch the value in BTC from that output.
@@ -278,7 +289,7 @@ process_tx() {
     local tx_json
     tx_json=$(fetch_tx "$txid") || {
         z_error --title="Transaction not found" \
-            --text="<b>Could not fetch transaction:</b>\n<tt>$txid</tt>\n\nCheck the txid and make sure:\n  • txindex=1 is enabled and reindexing is complete\n  • Bitcoin is fully synced\n  • This transaction is confirmed (not just in the mempool)"
+            --text="<b>Could not fetch transaction:</b>\n<tt>$txid</tt>\n\nCheck that:\n  • The txid is correct\n  • The transaction is confirmed (not mempool)\n  • The wallet containing this transaction is loaded in Bitcoin Core"
         return 1
     }
 

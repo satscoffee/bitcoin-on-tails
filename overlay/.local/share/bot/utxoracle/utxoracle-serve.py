@@ -37,6 +37,7 @@ import subprocess
 import threading
 import time
 import signal
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -72,11 +73,53 @@ LICENSE_NOTE = (
 )
 YOUTUBE_LINK = "https://www.youtube.com/channel/UCXN7Xa_BF7dqLErzOmS-B7Q/live"
 
+# --- Persistent price DB ----------------------------------------------------
+# SQLite file storing one row per date. Tiny: ~4000 rows * ~50 bytes = <1 MB
+# for the full history. Block-window prices are ephemeral (not stored here).
+
+DB_FILE = UTXO_DIR / "prices.db"
+_db_lock = threading.Lock()
+
+def db_init():
+    """Create the prices table if it doesn't exist."""
+    with _db_lock:
+        con = sqlite3.connect(str(DB_FILE))
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS prices (
+                date        TEXT PRIMARY KEY,
+                price_usd   INTEGER NOT NULL,
+                computed_at TEXT NOT NULL
+            )
+        """)
+        con.commit()
+        con.close()
+
+def db_get(date_str):
+    """Return cached price_usd for date_str, or None if not found."""
+    with _db_lock:
+        con = sqlite3.connect(str(DB_FILE))
+        row = con.execute(
+            "SELECT price_usd FROM prices WHERE date = ?", (date_str,)
+        ).fetchone()
+        con.close()
+    return row[0] if row else None
+
+def db_set(date_str, price_usd, computed_at):
+    """Upsert a price entry."""
+    with _db_lock:
+        con = sqlite3.connect(str(DB_FILE))
+        con.execute(
+            "INSERT OR REPLACE INTO prices (date, price_usd, computed_at) VALUES (?, ?, ?)",
+            (date_str, price_usd, computed_at),
+        )
+        con.commit()
+        con.close()
+
 # --- Cache state ------------------------------------------------------------
 
 _cache = {
     "block_window": None,   # dict or None
-    "by_date": {},          # date_str -> dict
+    "by_date": {},          # date_str -> dict (hot in-memory layer over DB)
     "last_error": None,
 }
 _cache_lock = threading.Lock()
@@ -183,6 +226,23 @@ def get_historical(date_str):
     except ValueError:
         return None
 
+    # Check persistent DB before running UTXOracle.py
+    cached_price = db_get(date_str)
+    if cached_price is not None:
+        log("Price for {} loaded from DB: ${}".format(date_str, cached_price))
+        entry = {
+            "label": "UTXOracle Consensus Price",
+            "description": "24-hour daily average for {} from confirmed blocks.".format(date_str),
+            "date": date_str,
+            "price_usd": cached_price,
+            "computed_at_unix": int(time.time()),
+            "computed_at_iso": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source": "db",
+        }
+        with _cache_lock:
+            _cache["by_date"][date_str] = entry
+        return entry
+
     utxo_date = date_str.replace("-", "/")
     log("Computing UTXOracle Consensus Price for {}...".format(date_str))
     price, raw, rc = run_utxoracle(["-d", utxo_date])
@@ -190,14 +250,17 @@ def get_historical(date_str):
         log("No price for {} (rc={})".format(date_str, rc))
         return None
 
+    computed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     entry = {
         "label": "UTXOracle Consensus Price",
         "description": "24-hour daily average for {} from confirmed blocks.".format(date_str),
         "date": date_str,
         "price_usd": price,
         "computed_at_unix": int(time.time()),
-        "computed_at_iso": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "computed_at_iso": computed_at,
+        "source": "computed",
     }
+    db_set(date_str, price, computed_at)
     with _cache_lock:
         _cache["by_date"][date_str] = entry
     return entry
@@ -505,6 +568,7 @@ def main(argv):
         print("Re-run `b` to repair the BoT install.", file=sys.stderr)
         return 3
 
+    db_init()
     write_pid()
 
     def handle_sig(signum, frame):
