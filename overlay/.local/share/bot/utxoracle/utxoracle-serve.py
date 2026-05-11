@@ -117,8 +117,13 @@ def run_utxoracle(args):
     """Invoke UTXOracle.py with the given args. Returns the parsed price (int) or None."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     cmd = ["python3", str(UTXO_PY), "-p", str(DATA_DIR)] + list(args)
+    # Suppress UTXOracle.py's webbrowser.open() call — the daemon serves the
+    # HTML over HTTP; opening a new browser tab on every block is not wanted.
+    env = os.environ.copy()
+    env["BROWSER"] = "/bin/true"
     result = subprocess.run(
         cmd, capture_output=True, text=True, timeout=900, cwd=str(OUTPUT_DIR),
+        env=env,
     )
     raw = result.stdout
     price = None
