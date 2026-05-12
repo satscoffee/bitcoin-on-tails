@@ -42,7 +42,7 @@ The first run helps you turn on Persistent Storage and the right TPS features (D
 ## Tools shipped in `PATH`
 
 - `b` — top-level installer / updater. Run with no arguments to install or update; pass `--version` to print the BoT version.
-- `bot-menu` — yad-based control panel. Status, Bitcoin, Sparrow, UTXOracle Price, and About tabs.
+- `bot-menu` — yad-based control panel. Status, Bitcoin, Sparrow, UTXOracle Price, Apps, and About tabs.
 - `install-core`, `install-knots`, `install-sparrow` — standalone installers for each component.
 - `utxoracle` — one-shot wrapper around the bundled UTXOracle snapshot. `utxoracle` for yesterday's UTXOracle Consensus Price, `utxoracle -rb` for the UTXOracle Block Window Price (last 144 confirmed blocks). Generates a chart and opens it in Tor Browser.
 - `utxoracle-serve` — start/stop/status control for the local HTTP price oracle (loopback-only, refreshes per block). `utxoracle-serve start | stop | status | restart | url | open`.
@@ -72,6 +72,16 @@ Start it with `utxoracle-serve start` (or from the **UTXOracle Price** tab in `b
 **Use with Sparrow Wallet.** Sparrow's stable releases don't yet support a custom price-source URL. The local server is here as the foundation: any tool that *does* take a custom URL can use it today, and we plan to file an upstream feature request with Sparrow for a Custom URL exchange source. Until then, set Sparrow's currency source to **None** for strict privacy or one of its built-in sources (which will reach out over Tor).
 
 **License posture.** All price-bearing responses include `_meta.source` naming the output canonically as "UTXOracle Block Window Price" or "UTXOracle Consensus Price" per UTXOracle License v1.0 §2.4. The status page surfaces the canonical labels and the YouTube live-stream link per §2.7. The license itself is bundled at `~/.local/share/bot/utxoracle/LICENSE.txt`.
+
+## Apps tab
+
+`bot-menu` includes an **Apps** tab for supplementary sovereign-Bitcoin tools that complement your node. Entries are either web-only (a button that opens a service in Tor Browser, nothing to install locally) or installable (a button that runs an installer the first time, then flips to an Open / Run control once installed).
+
+Current entries:
+
+- **RoboSats** — peer-to-peer Bitcoin trading over Tor and Lightning. No KYC, no account; escrow is held briefly by the federation coordinator you pick. The Apps tab button opens `learn.robosats.org` in Tor Browser; you choose a coordinator from the federation list there.
+
+More entries are planned for future releases (OpenTimestamps for sovereign timestamping against your own node, Boltz CLI for Lightning ↔ on-chain swaps without running an LN node).
 
 ## Install
 
