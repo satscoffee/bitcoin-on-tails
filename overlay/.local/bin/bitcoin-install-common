@@ -171,11 +171,10 @@ bot_data_dir_size_bytes() {
 # bot_changelog_url SLUG VERSION → echoes upstream release-notes URL.
 bot_changelog_url() {
     case "$1" in
-        core)         echo "https://bitcoincore.org/en/releases/$2/" ;;
-        knots)        echo "https://github.com/bitcoinknots/bitcoin/releases/tag/v$2" ;;
-        knots-bip110) echo "https://github.com/dathonohm/bitcoin/releases/tag/v$2" ;;
-        sparrow)      echo "https://github.com/sparrowwallet/sparrow/releases/tag/$2" ;;
-        *)            echo "" ;;
+        core)    echo "https://bitcoincore.org/en/releases/$2/" ;;
+        knots)   echo "https://github.com/bitcoinknots/bitcoin/releases/tag/v$2" ;;
+        sparrow) echo "https://github.com/sparrowwallet/sparrow/releases/tag/$2" ;;
+        *)       echo "" ;;
     esac
 }
 
@@ -236,11 +235,10 @@ bot_write_check_kv() {
     bot_persistence_unlocked && persistence=true || persistence=false
     local label src_url chg_url installed_path
     case "$slug" in
-        core)         label="Bitcoin Core";          src_url="https://bitcoincore.org/bin/" ;;
-        knots)        label="Bitcoin Knots";         src_url="https://bitcoinknots.org/files/" ;;
-        knots-bip110) label="Bitcoin Knots + BIP-110"; src_url="https://github.com/dathonohm/bitcoin/releases" ;;
-        sparrow)      label="Sparrow Wallet";        src_url="https://github.com/sparrowwallet/sparrow/releases" ;;
-        *)            label="$slug";                 src_url="" ;;
+        core)    label="Bitcoin Core";    src_url="https://bitcoincore.org/bin/" ;;
+        knots)   label="Bitcoin Knots";   src_url="https://bitcoinknots.org/files/" ;;
+        sparrow) label="Sparrow Wallet";  src_url="https://github.com/sparrowwallet/sparrow/releases" ;;
+        *)       label="$slug";           src_url="" ;;
     esac
     chg_url="$(bot_changelog_url "$slug" "$latest")"
     if [ -n "$override_path" ]; then
@@ -813,13 +811,12 @@ if OLD_VER=$(bitcoind --version 2>/dev/null); then
     fi
 else
     action=installation
-    # For single-signer dists (Knots, Knots+BIP-110), the relevant key was
-    # already imported and stamped into builder-keys earlier in install-knots
-    # / install-knots-bip110. We don't iterate the bundled trusted-keys dir
-    # here because (a) only Core's multi-signer flow needs aggregation across
-    # bundled keys, and (b) the iteration produces a misleading wall of
-    # "trusted key X did not sign" warnings for keys that were never
-    # candidate signers for this dist anyway.
+    # For single-signer dists (Knots), the relevant key was already imported
+    # and stamped into builder-keys earlier in install-knots. We don't iterate
+    # the bundled trusted-keys dir here because (a) only Core's multi-signer
+    # flow needs aggregation across bundled keys, and (b) the iteration
+    # produces a misleading wall of "trusted key X did not sign" warnings for
+    # keys that were never candidate signers for this dist anyway.
     if [ -z "${SINGLE_SIGNER:-}" ]; then
         # Multi-signer (Core): import any bundled trusted-keys whose
         # fingerprint matches a builder-keys entry. Aggregation logic

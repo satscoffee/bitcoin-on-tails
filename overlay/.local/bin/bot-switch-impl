@@ -49,9 +49,8 @@ if [ -z "$current" ]; then
 fi
 
 case "$current" in
-    core)         current_label="Bitcoin Core"  ;;
-    knots)        current_label="Bitcoin Knots" ;;
-    knots-bip110) current_label="Bitcoin Knots + BIP-110" ;;
+    core)  current_label="Bitcoin Core"  ;;
+    knots) current_label="Bitcoin Knots" ;;
     *)
         zenity --error --title="Unknown implementation" \
             --text="The dist marker at <tt>$XDG_STATE_HOME/bot/dist</tt> contains an unrecognized value: <tt>$current</tt>\n\nPlease uninstall and reinstall to recover." \
@@ -62,10 +61,9 @@ esac
 
 current_ver="$(bot_get_installed_version 2>/dev/null || echo "")"
 
-# Build the picker. Offer: switch to either of the OTHER two implementations,
-# OR reinstall the CURRENT implementation. All three full impls (core, knots,
-# knots-bip110) share the same on-disk chain format, so any switch is just a
-# binary swap from the user's perspective.
+# Build the picker. Offer: switch to the OTHER implementation, OR reinstall
+# the CURRENT implementation. Core and Knots share the same on-disk chain
+# format, so any switch is just a binary swap from the user's perspective.
 explainer="<b>Current implementation: $current_label${current_ver:+ $current_ver}</b>
 
 Switching implementations — or reinstalling the current one — only replaces the Bitcoin binaries on this USB.
@@ -77,23 +75,20 @@ Switching implementations — or reinstalling the current one — only replaces 
 
 <b>What does change:</b>
   • The <tt>bitcoind</tt> / <tt>bitcoin-qt</tt> binaries are replaced.
-  • The first launch after a switch may run a brief consistency check on the chain — this is normal.
-  • <b>Switching to or from Knots + BIP-110 changes which transactions your node will relay and accept.</b> If BIP-110 has activated and you switch away from it, you may briefly serve blocks the wider network rejects. Only relevant once activation lands."
+  • The first launch after a switch may run a brief consistency check on the chain — this is normal."
 
-# Build dynamic radiolist with the two non-current impls + reinstall.
+# Build dynamic radiolist with the non-current impl + reinstall.
 declare -A IMPL_LABELS=(
     [core]="Bitcoin Core"
     [knots]="Bitcoin Knots"
-    [knots-bip110]="Bitcoin Knots + BIP-110"
 )
 declare -A IMPL_NOTES=(
     [core]="Reference implementation, multi-signer verification (3 signatures)"
     [knots]="Luke Dashjr's fork, single-signer verification"
-    [knots-bip110]="Non-mainline soft-fork build (chain-split risk if BIP-110 activates differently)"
 )
 
 picker_args=()
-for slug in core knots knots-bip110; do
+for slug in core knots; do
     [ "$slug" = "$current" ] && continue
     picker_args+=(FALSE "switch:$slug" "Switch to ${IMPL_LABELS[$slug]} — ${IMPL_NOTES[$slug]}")
 done

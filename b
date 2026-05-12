@@ -94,10 +94,9 @@ elif [ "$1" == "--status" ]; then
   if [ -s "$marker" ]; then
       dist="$(head -1 "$marker" | tr -d '[:space:]')"
       case "$dist" in
-          core)         echo "Implementation: Bitcoin Core"  ;;
-          knots)        echo "Implementation: Bitcoin Knots" ;;
-          knots-bip110) echo "Implementation: Bitcoin Knots + BIP-110 (signaling)" ;;
-          *)            echo "Implementation: $dist (unknown marker value)" ;;
+          core)  echo "Implementation: Bitcoin Core"  ;;
+          knots) echo "Implementation: Bitcoin Knots" ;;
+          *)     echo "Implementation: $dist (unknown marker value)" ;;
       esac
   elif command -v bitcoind >/dev/null 2>&1; then
       if bitcoind --version 2>/dev/null | grep -qi knots; then
@@ -167,7 +166,7 @@ elif [ "$1" == "--check" ] || [ "$1" == "--update" ] || [ "$1" == "--uninstall" 
     fi
   fi
   case "$dist" in
-    core|knots|knots-bip110)
+    core|knots)
       # Resolve the installer absolutely so a still-broken PATH gives a
       # clearer error than "command not found" if something else is wrong.
       installer="$(command -v "install-$dist" 2>/dev/null \
@@ -368,18 +367,17 @@ else
   fi
   if [ -z "$1" ]; then # Install/Update if ran without a parameter
     # Ask which Bitcoin implementation to install. No default — user must choose.
-    # Three options presented as equals: Core, Knots, Knots+BIP-110.
+    # Two options presented as equals: Core and Knots.
     bot_raise_dialog "Choose a Bitcoin implementation"
     bitcoin_impl=$(zenity --list --radiolist \
         --title="Choose a Bitcoin implementation" \
-        --text="<b>No default selected — please pick one.</b>\n\nAll three are full-node implementations of the Bitcoin protocol." \
+        --text="<b>No default selected — please pick one.</b>\n\nBoth are full-node implementations of the Bitcoin protocol." \
         --column="Pick" --column="Implementation" --column="Notes" \
-        FALSE "core"         "Bitcoin Core — reference implementation, multi-signer verification (3 signatures)" \
-        FALSE "knots"        "Bitcoin Knots — Luke Dashjr's fork, single-signer verification" \
-        FALSE "knots-bip110" "Bitcoin Knots + BIP-110 — non-mainline soft-fork build (chain-split risk if you don't know what this is)" \
-        --width=820 --height=420 \
+        FALSE "core"  "Bitcoin Core — reference implementation, multi-signer verification (3 signatures)" \
+        FALSE "knots" "Bitcoin Knots — Luke Dashjr's fork, single-signer verification" \
+        --width=820 --height=380 \
         "$ICON" --icon=bitcoin128) || {
-          zenity --error --title="No implementation selected" --text="You must choose Bitcoin Core, Bitcoin Knots, or Bitcoin Knots + BIP-110 to continue." --ellipsize "$ICON"
+          zenity --error --title="No implementation selected" --text="You must choose Bitcoin Core or Bitcoin Knots to continue." --ellipsize "$ICON"
           exit 1
         }
     case "$bitcoin_impl" in
@@ -391,12 +389,8 @@ else
         # shellcheck disable=SC1091
         . install-knots
         ;;
-      knots-bip110)
-        # shellcheck disable=SC1091
-        . install-knots-bip110
-        ;;
       *)
-        zenity --error --title="No implementation selected" --text="You must choose Bitcoin Core, Bitcoin Knots, or Bitcoin Knots + BIP-110 to continue." --ellipsize "$ICON"
+        zenity --error --title="No implementation selected" --text="You must choose Bitcoin Core or Bitcoin Knots to continue." --ellipsize "$ICON"
         exit 1
         ;;
     esac
