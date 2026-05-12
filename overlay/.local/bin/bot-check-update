@@ -49,7 +49,7 @@ mk_terminal_action() {
 # --- Validate state ---------------------------------------------------------
 
 if [ ! -d "$INSTALLED_BOT_DIR/.git" ]; then
-    msg="The installed BoT directory at\n<tt>$INSTALLED_BOT_DIR</tt>\nisn't a git checkout, so I can't check for updates against origin.\n\nTo get update checking, re-install via:\n\n<tt>git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot &amp;&amp; ~/bot/b</tt>"
+    msg="The installed BoT directory at\n<tt>$INSTALLED_BOT_DIR</tt>\nisn't a git checkout, so I can't check for updates against origin.\n\nTo get update checking, re-install via:\n\n<tt>rm -rf ~/bot &amp;&amp; git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot &amp;&amp; ~/bot/b</tt>"
     bot_raise_dialog "Cannot check for updates"
     if command -v zenity >/dev/null 2>&1; then
         zenity --warning --title="Cannot check for updates" --text="$msg" --width=520 \
@@ -114,7 +114,7 @@ fi
 #   2. Copy the manual one-liner       text is selectable in the dialog
 #   3. Cancel                          (default)
 
-manual_cmd_clone='git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot && ~/bot/b'
+manual_cmd_clone='rm -rf ~/bot && git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot && ~/bot/b'
 manual_cmd_pull="cd $INSTALLED_BOT_DIR && git pull && ./b"
 manual_cmd_verify="cd $INSTALLED_BOT_DIR && git tag -v $latest_tag"
 

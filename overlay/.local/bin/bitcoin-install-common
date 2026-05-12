@@ -1011,19 +1011,6 @@ else
             prune_GB=0
         fi
 
-        # Ask whether to enable txindex — only offered for archival (non-pruned)
-        # installs since txindex is incompatible with pruning. Building it
-        # during IBD avoids a separate multi-hour reindex later.
-        local enable_txindex=0
-        if (( prune_MiB == 0 )); then
-            if z_question \
-                --title="Transaction Index (optional)" \
-                --text="<b>Enable transaction index (txindex)?</b>\n\nBuilds a full transaction index <i>during</i> IBD — no separate reindex needed later.\n\nRequired for the <b>Transaction Inspector</b> tool.\n\n  • Adds ~40–50 GB disk space (grows with chain)\n  • Slightly slows IBD\n  • Can be enabled later from the Transaction Inspector (triggers a multi-hour reindex)\n\n<b>Skip</b> if you are unsure." \
-                --ok-label="Enable txindex" --cancel-label="Skip (not now)"; then
-                enable_txindex=1
-            fi
-        fi
-
         # Ask which network mode to use. Falls back to Tor (recommended) on cancel
         # so the install never wedges and the user is never accidentally on
         # clearnet with their IP exposed.
@@ -1062,20 +1049,6 @@ JSON
 JSON
                 ;;
         esac
-
-        # Inject txindex into settings.json if user opted in above.
-        if (( enable_txindex )); then
-            python3 -c "
-import json
-path = '$DATA_DIR/settings.json'
-with open(path) as f:
-    d = json.load(f)
-d['txindex'] = '1'
-with open(path, 'w') as f:
-    json.dump(d, f, indent=4)
-print('settings.json: txindex=1 added')
-"
-        fi
     fi
 
     # Cache chainparams.cpp into a stable location so bot-set-prune can read
