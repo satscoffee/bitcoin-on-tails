@@ -544,7 +544,11 @@ build_utxoracle_tab() {
     # Local HTTP server status (utxoracle-serve). Decoupled from the one-shot
     # wrapper above — the server runs in the background and refreshes on
     # each new confirmed block. Reading PID + healthz here is non-blocking.
-    local server_port server_url server_status server_pid server_pid_file
+    # server_running drives the single Start/Stop toggle button below: 1 when
+    # the daemon is up (offer Stop), 0 otherwise (offer Start). A stale PID
+    # file is treated as "not running" because the next user click should be
+    # Start, which will overwrite the stale PID.
+    local server_port server_url server_status server_pid server_pid_file server_running=0
     server_port="${UTXORACLE_SERVE_PORT:-17601}"
     server_url="http://127.0.0.1:$server_port"
     server_pid_file="${XDG_RUNTIME_DIR:-/tmp}/utxoracle-serve.pid"
@@ -552,6 +556,7 @@ build_utxoracle_tab() {
         server_pid=$(cat "$server_pid_file" 2>/dev/null)
         if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
             server_status="Running on $server_url (pid $server_pid)"
+            server_running=1
         else
             server_status="Stopped (stale PID file)"
         fi
@@ -583,7 +588,7 @@ build_utxoracle_tab() {
     local refresh='pkill -f "yad --notebook" 2>/dev/null; sleep 0.5; exec bot-menu'
 
     # Action commands.
-    local cmd_consensus cmd_block cmd_show cmd_serve_start cmd_serve_stop cmd_serve_status
+    local cmd_consensus cmd_block cmd_show cmd_serve_status
     # No `; $refresh` here — auto-refreshing kills bot-menu and re-execs it,
     # which the user perceives as BoT closing/reopening with each action.
     # User can click the Refresh button at the bottom of the window when they
@@ -602,11 +607,20 @@ build_utxoracle_tab() {
             --ellipsize $ICON_ARG &"
     fi
     # Server controls — wrap in a terminal so users see start/stop output.
-    # Append $refresh so the bot-menu re-renders with the new server status
-    # automatically once the start/stop action returns.
-    # Same — no auto-refresh. Use the Refresh button to update Server status.
-    cmd_serve_start="$(mk_action  'BoT — start utxoracle-serve'  'utxoracle-serve start')"
-    cmd_serve_stop="$(mk_action   'BoT — stop utxoracle-serve'   'utxoracle-serve stop')"
+    # Single toggle button: label and action flip based on $server_running so
+    # the user never sees an "irrelevant" button (you can't Stop something
+    # that isn't running, etc.). The user clicks Refresh at the bottom of the
+    # window to pick up the new state after toggling. Auto-refresh was
+    # deliberately not used here — it kills+re-execs bot-menu, which the
+    # user perceives as the panel closing/reopening on every action.
+    local cmd_serve_toggle serve_toggle_label
+    if (( server_running )); then
+        cmd_serve_toggle="$(mk_action 'BoT — stop utxoracle-serve'  'utxoracle-serve stop')"
+        serve_toggle_label="Stop utxoracle-serve"
+    else
+        cmd_serve_toggle="$(mk_action 'BoT — start utxoracle-serve' 'utxoracle-serve start')"
+        serve_toggle_label="Start utxoracle-serve"
+    fi
     cmd_serve_status="$(mk_action 'BoT — utxoracle-serve status' 'utxoracle-serve status')"
 
     canonical="<b>UTXOracle</b> derives a Bitcoin price from <b>your own node's data only</b> — no third-party APIs, no IP leaks. Bundled snapshot from <tt>utxo.live</tt>; license preserved at <tt>$XDG_DATA_HOME/bot/utxoracle/LICENSE.txt</tt>.\n\n<b>Local HTTP price server (utxoracle-serve):</b> binds to <tt>127.0.0.1</tt> only, refreshes on each new confirmed block, exposes CoinGecko/Coinbase-shape endpoints + a native /price?date= for historical lookups. Accessible from Tor Browser on this Tails session only — external devices and other browsers (including Onion Browser on iOS) cannot reach 127.0.0.1 on this machine. From a terminal: <tt>btcprice</tt> for the latest price, <tt>btcprice 2024-04-15</tt> for a date."
@@ -622,8 +636,7 @@ build_utxoracle_tab() {
         --field="Compute UTXOracle Block Window Price (last 144):FBTN" "$cmd_block" \
         --field="<b>Local price server</b>:LBL" "" \
         --field="Server status:RO" "$server_status" \
-        --field="Start utxoracle-serve:FBTN" "$cmd_serve_start" \
-        --field="Stop utxoracle-serve:FBTN"  "$cmd_serve_stop" \
+        --field="${serve_toggle_label}:FBTN" "$cmd_serve_toggle" \
         --field="Show server status:FBTN"    "$cmd_serve_status" \
         --field=":LBL" "$canonical" &
 }

@@ -34,6 +34,7 @@ import json
 import os
 import sys
 import subprocess
+import tempfile
 import threading
 import time
 import signal
@@ -157,17 +158,29 @@ def get_block_count():
 
 
 def run_utxoracle(args):
-    """Invoke UTXOracle.py with the given args. Returns the parsed price (int) or None."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    """Invoke UTXOracle.py with the given args. Returns the parsed price (int) or None.
+
+    UTXOracle.py unconditionally writes its HTML report to its cwd. The daemon
+    only needs the price line from stdout — it does not want HTML files
+    accumulating in OUTPUT_DIR on every confirmed block. Run UTXOracle.py
+    inside a tempfile.TemporaryDirectory so the HTML report (and any other
+    side-effect files) are cleaned up automatically when the context exits.
+    The user-invoked `utxoracle` wrapper continues to write to OUTPUT_DIR
+    because that path goes through a separate cd in the shell wrapper, not
+    through this function.
+
+    BROWSER=/bin/true short-circuits UTXOracle.py's webbrowser.open() call;
+    without it Python tries to launch Tor Browser per recompute, which the
+    daemon definitely does not want.
+    """
     cmd = ["python3", str(UTXO_PY), "-p", str(DATA_DIR)] + list(args)
-    # Suppress UTXOracle.py's webbrowser.open() call — the daemon serves the
-    # HTML over HTTP; opening a new browser tab on every block is not wanted.
     env = os.environ.copy()
     env["BROWSER"] = "/bin/true"
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=900, cwd=str(OUTPUT_DIR),
-        env=env,
-    )
+    with tempfile.TemporaryDirectory(prefix="utxoracle-serve-") as scratch:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=900, cwd=scratch,
+            env=env,
+        )
     raw = result.stdout
     price = None
     for line in raw.splitlines():
