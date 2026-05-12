@@ -641,6 +641,67 @@ build_utxoracle_tab() {
         --field=":LBL" "$canonical" &
 }
 
+###############################################################################
+# Apps tab — supplementary sovereign-Bitcoin tools that complement the BoT
+# core stack (Bitcoin Core/Knots + Sparrow + UTXOracle).
+#
+# Per-app section pattern:
+#   1. <b>Name — short tagline</b>:LBL  (header)
+#   2. :LBL  (multi-line description)
+#   3. Status:RO  (state — see below)
+#   4. one or two FBTN action rows
+#   5. :LBL "" (blank — visual separator before the next app)
+#
+# Two UX patterns supported:
+#   A) Web-app (RoboSats, future bookmark-style entries):
+#      Status="Available (web service)" → single Open button that launches
+#      Tor Browser against a stable URL. Nothing to install.
+#
+#   B) Install-app (future: OpenTimestamps, Boltz CLI, Fedimint client):
+#      Status="Not installed" → Install button → first run kicks off the
+#      installer. Subsequent renders detect the installed state (binary on
+#      PATH, marker file, etc.) and show "Status: Ready" plus Open/Run +
+#      optional Stop or Uninstall buttons. Same toggle pattern as the
+#      utxoracle-serve Start/Stop button in build_utxoracle_tab.
+#
+# Window height is currently 560 px — fits ~3-4 apps comfortably. If this
+# tab grows past 5 entries, consider splitting into sub-tabs or moving the
+# heaviest installer into its own top-level tab.
+###############################################################################
+build_apps_tab() {
+    local key=$1
+
+    # Tor Browser launcher detection — same pattern as build_utxoracle_tab.
+    # On Tails the default browser handler is already Tor Browser, so
+    # xdg-open is a safe final fallback.
+    local open_browser
+    if command -v torbrowser-launcher >/dev/null 2>&1; then
+        open_browser="torbrowser-launcher"
+    elif [ -x /usr/local/bin/tor-browser ]; then
+        open_browser="/usr/local/bin/tor-browser"
+    else
+        open_browser="xdg-open"
+    fi
+
+    # --- RoboSats ---------------------------------------------------------
+    # Web-only — nothing to install. learn.robosats.org is the canonical
+    # entry point and lists every active federation coordinator; users pick
+    # which one to trade through. We deliberately do not hardcode a single
+    # coordinator onion here — coordinators come and go, the docs site has
+    # been stable since 2023 and surfaces the current list.
+    local robosats_url="https://learn.robosats.org/"
+    local cmd_robosats_open
+    cmd_robosats_open="($open_browser $(printf '%q' "$robosats_url")) >/dev/null 2>&1 &"
+
+    yad --plug="$key" --tabnum=5 \
+        --form --columns=1 \
+        --field=":LBL" "Optional sovereign-Bitcoin tools that complement your node. Web-only entries open in Tor Browser; installable entries appear here as they ship." \
+        --field="<b>RoboSats — P2P Bitcoin trading</b>:LBL" "" \
+        --field=":LBL" "Buy and sell Bitcoin peer-to-peer over Tor and Lightning. No KYC, no account — escrow is held briefly by the coordinator you pick. RoboSats is a web app that runs in Tor Browser; nothing to install locally.\n\nThe button opens the federation landing page; pick a coordinator from there." \
+        --field="Status:RO" "Available (web service)" \
+        --field="Open RoboSats in Tor Browser:FBTN" "$cmd_robosats_open" &
+}
+
 build_about_tab() {
     local key=$1
     local body
@@ -661,7 +722,7 @@ Public key: <a href='$GPG_KEY_URL'>$GPG_KEY_URL</a>
 
 Cross-check the fingerprint against an independent source before importing."
 
-    yad --plug="$key" --tabnum=5 \
+    yad --plug="$key" --tabnum=6 \
         --form --columns=1 \
         --text="$body" \
         --text-align=left &
@@ -677,6 +738,7 @@ main() {
     build_bitcoin_tab "$key"
     build_sparrow_tab "$key"
     build_utxoracle_tab "$key"
+    build_apps_tab "$key"
     build_about_tab "$key"
 
     # Tab label "UTXOracle Price" — if it gets cut off in your install, swap to
@@ -688,7 +750,7 @@ main() {
     yad --notebook --key="$key" \
         --title="Bitcoin on Tails" \
         --tab="Status" --tab="Bitcoin" --tab="Sparrow" --tab="UTXOracle Price" \
-        --tab="About" \
+        --tab="Apps" --tab="About" \
         --width=680 --height=560 \
         --button="Refresh!gtk-refresh:42" \
         --button="gtk-close:0" \
