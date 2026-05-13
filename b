@@ -7,7 +7,7 @@
 # and launches install-core or install-knots.
 ###############################################################################
 
-export VERSION='v0.11.0-alpha'
+export VERSION='v0.11.1-alpha'
 export ICON="--icon=$HOME/.local/share/icons/bot128.png"
 export DOTFILES='/live/persistence/TailsData_unlocked/dotfiles'
 readonly SECURITY_IN_A_BOX_URL="https://securityinabox.org/en/"
@@ -280,17 +280,24 @@ else
     persistent-setup
   elif ((bot_already_setup)); then
     # Working-tree run on a stick that already has BoT installed. Don't force
-    # a full reinstall — let the user pick what they actually wanted.
-    bot_raise_dialog "Bitcoin on Tails is already installed"
-    dev_choice=$(zenity --list --radiolist \
-        --title="Bitcoin on Tails is already installed" \
-        --text="<b>BoT is already set up in your Persistent Storage.</b>\n\nYou ran <tt>b</tt> from a working tree at:\n<tt>$BOT_DIR</tt>\n\nWhat would you like to do?" \
-        --column="Pick" --column="Action" --column="Notes" \
-        TRUE  "refresh"   "Sync new scripts only — no Bitcoin download" \
-        FALSE "menu"      "Sync scripts, then open the BoT control panel" \
-        FALSE "reinstall" "Run the full install flow again (re-downloads Bitcoin)" \
-        --width=720 --height=320 \
-        "$ICON" --icon=bitcoin128) || exit 0
+    # a full reinstall — let the user pick what they actually wanted, UNLESS
+    # we were invoked by bot-update-now (BOT_AUTO_REFRESH=1), in which case
+    # the user already consented to refresh via the upgrade button and
+    # we skip straight to refresh path without showing the picker.
+    if [ "${BOT_AUTO_REFRESH:-0}" = "1" ]; then
+        dev_choice="refresh"
+    else
+        bot_raise_dialog "Bitcoin on Tails is already installed"
+        dev_choice=$(zenity --list --radiolist \
+            --title="Bitcoin on Tails is already installed" \
+            --text="<b>BoT is already set up in your Persistent Storage.</b>\n\nYou ran <tt>b</tt> from a working tree at:\n<tt>$BOT_DIR</tt>\n\nWhat would you like to do?" \
+            --column="Pick" --column="Action" --column="Notes" \
+            TRUE  "refresh"   "Sync new scripts only — no Bitcoin download" \
+            FALSE "menu"      "Sync scripts, then open the BoT control panel" \
+            FALSE "reinstall" "Run the full install flow again (re-downloads Bitcoin)" \
+            --width=720 --height=320 \
+            "$ICON" --icon=bitcoin128) || exit 0
+    fi
     case "$dev_choice" in
       refresh|menu)
         # shellcheck disable=SC1091
@@ -307,18 +314,52 @@ else
         rsync -rvh "$BOT_DIR"/ "$INSTALLED_BOT_DIR"
         link-dotfiles
         wait
-        # Always confirm the refresh succeeded, then launch bot-menu so the
-        # user sees their changes immediately. --width forces full text;
-        # --ellipsize was previously truncating both lines mid-word.
-        zenity --info --title="Scripts refreshed" \
-            --width=560 \
-            --text="BoT scripts have been synced into Persistent Storage at <b>$VERSION</b>.\n\nFrom any terminal you can now test:\n<tt>b --check</tt>, <tt>b --update</tt>, <tt>b --uninstall</tt>, or <tt>bot-menu</tt>.\n\nThe BoT control panel will open next." \
-            "$ICON" --icon=bitcoin128
-        # Launch bot-menu detached so this terminal closes cleanly.
-        # `exec bot-menu` kept the terminal open while the menu ran.
-        # disown removes it from the job table so it survives terminal exit.
-        bot-menu &
-        disown $!
+
+        # Kill any leftover bot-menu instance BEFORE launching the new one.
+        # Without this, the user ends up with two stacked control panels
+        # after an auto-update: the stale M1 (loaded into memory with the
+        # OLD scripts) underneath, the freshly-rsynced M2 on top. Worse,
+        # users were clicking buttons on M1 thinking they were on M2 and
+        # seeing "the new feature doesn't work" — because M1's buttons
+        # still pointed at the old URLs / commands.
+        #
+        # We match on `yad --notebook` which is unique to bot-menu's top-
+        # level form. -f checks the full command line, -x avoids partial
+        # matches against other yad invocations elsewhere.
+        pkill -f 'yad --notebook --key=' 2>/dev/null || true
+        # Tiny grace period so the killed yad releases its X11 grab cleanly
+        # before the replacement opens — otherwise the new menu can open
+        # behind the corpse of the old one.
+        sleep 0.5
+
+        # Two paths to launch the fresh bot-menu:
+        #
+        #   Manual run from a terminal (BOT_AUTO_REFRESH unset): show the
+        #   "Scripts refreshed" confirmation dialog so the user has a
+        #   visible signal that the refresh succeeded; then fork bot-menu
+        #   in the background and exit.
+        #
+        #   Auto-update run (BOT_AUTO_REFRESH=1): skip the confirmation
+        #   dialog (the new menu appearing IS the confirmation) and emit
+        #   only a transient zenity --notification, so we don't make the
+        #   user click OK to get to their menu. Use setsid with stdio
+        #   redirected to /dev/null so the new bot-menu is fully detached
+        #   from any inherited controlling terminal — without this, a
+        #   downstream terminal closure SIGHUPs the new menu dead.
+        if [ "${BOT_AUTO_REFRESH:-0}" = "1" ]; then
+            zenity --notification \
+                --text="Bitcoin on Tails updated to $VERSION" \
+                "$ICON" --icon=bitcoin128 2>/dev/null || true
+            setsid bot-menu </dev/null >/dev/null 2>&1 &
+            disown $! 2>/dev/null || true
+        else
+            zenity --info --title="Scripts refreshed" \
+                --width=560 \
+                --text="BoT scripts have been synced into Persistent Storage at <b>$VERSION</b>.\n\nFrom any terminal you can now test:\n<tt>b --check</tt>, <tt>b --update</tt>, <tt>b --uninstall</tt>, or <tt>bot-menu</tt>.\n\nThe BoT control panel will open next." \
+                "$ICON" --icon=bitcoin128
+            setsid bot-menu </dev/null >/dev/null 2>&1 &
+            disown $! 2>/dev/null || true
+        fi
         exit 0
         ;;
       reinstall)

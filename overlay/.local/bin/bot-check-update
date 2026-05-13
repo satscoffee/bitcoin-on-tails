@@ -38,13 +38,14 @@ type bot_raise_dialog >/dev/null 2>&1 || bot_raise_dialog() {
     ) >/dev/null 2>&1 &
 }
 
-mk_terminal_action() {
-    # Spawn a new terminal that runs the given command, and pauses so the
-    # user can read output before closing.
-    local title="$1" cmd="$2"
-    printf 'x-terminal-emulator -T %q -e bash -lc %q &' "$title" \
-        "$cmd; echo; read -rsn 1 -p 'Press any key to close. ' _; echo"
-}
+# NOTE: This script used to spawn the auto-update in a new terminal via a
+# helper called mk_terminal_action. That created a cascade of stale windows
+# the user had to manually close after every update (the wrapping terminal
+# left a "press any key to close" prompt, the SIGHUP from closing it would
+# kill the new bot-menu the update just launched, and the original menu
+# stayed underneath everything). The new flow runs bot-update-now silently
+# in the background with stdio fully detached via setsid — bot-update-now
+# does all its own UI via zenity dialogs.
 
 # --- Validate state ---------------------------------------------------------
 
@@ -71,12 +72,31 @@ local_ver=$(./b --version 2>/dev/null | sed 's/^Bitcoin on Tails //')
 [ -z "$local_ver" ] && local_ver="(unknown)"
 
 echo "Checking for BoT updates against $remote/$default_branch over Tor..."
-echo "(This can take a few seconds.)"
-echo
 
 # --- Fetch ------------------------------------------------------------------
+#
+# Show a pulsating progress dialog while git fetch runs. Tor circuits can
+# make this take 5-30 seconds; without a visible indicator the user sees
+# nothing happen and clicks the menu button a second time, spawning a
+# second fetch. The progress dialog is auto-closed when fetch returns.
+#
+# We capture fetch's exit code via a temp file because piping to zenity
+# eats the exit status. Tee'd to stderr too for terminal-mode debugging.
 
-if ! timeout 30 git fetch --tags --force "$remote" "$default_branch" 2>&1; then
+bot_raise_dialog "Checking for BoT updates"
+fetch_status_file=$(mktemp)
+trap 'rm -f "$fetch_status_file"' EXIT
+
+(
+    timeout 30 git fetch --tags --force "$remote" "$default_branch" >&2
+    echo $? > "$fetch_status_file"
+) | zenity --progress --pulsate --auto-close --no-cancel \
+    --title="Checking for BoT updates" \
+    --text="Fetching latest tags from $remote over Tor..." \
+    --width=420 "$ICON_ARG" --icon=bot128 2>/dev/null || true
+
+fetch_rc=$(cat "$fetch_status_file" 2>/dev/null || echo 1)
+if [ "$fetch_rc" -ne 0 ]; then
     bot_raise_dialog "Update check failed"
     zenity --error --title="Update check failed" \
         --text="Could not reach GitHub to check for BoT updates.\n\nThis is usually a slow or stuck Tor circuit. Try:\n\n  1. Wait a moment and click <b>Check for Updates</b> again\n  2. Or update manually — open a terminal and run:\n\n<tt>rm -rf ~/bot \&amp;\&amp; git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot \&amp;\&amp; ~/bot/b</tt>\n\n     Then pick <b>refresh</b> to apply the latest scripts." \
@@ -107,23 +127,24 @@ if [ "$behind" -eq 0 ]; then
 fi
 
 # --- Updates available — yad form with copyable commands -------------------
-
-# Yad's TXT/RO field renders selectable text with copy-friendly behavior.
-# We give the user three options:
-#   1. Auto-update now (button)        runs bot-update-now in a fresh terminal
-#   2. Copy the manual one-liner       text is selectable in the dialog
-#   3. Cancel                          (default)
+#
+# Use window-bottom --button entries (not in-form FBTN fields) so clicking
+# "Upgrade now" CLOSES this dialog with a distinct exit code. We then fire
+# bot-update-now from the script AFTER yad exits — cleanly, without
+# leaving a stale "Update available" window behind. The previous FBTN
+# approach left the dialog open after firing.
+#
+# Exit code conventions:
+#   42 — user clicked "Upgrade now"
+#    0 — user clicked Close / dismissed
+# (yad reserves 252 for window-close button [X] — treated same as Close.)
 
 manual_cmd_clone='rm -rf ~/bot && git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot && ~/bot/b'
 manual_cmd_pull="cd $INSTALLED_BOT_DIR && git pull && ./b"
 manual_cmd_verify="cd $INSTALLED_BOT_DIR && git tag -v $latest_tag"
 
-cmd_auto_update="$(mk_terminal_action 'BoT — auto-update' 'bot-update-now')"
-
-# yad notebook would be overkill; a single form with TXT fields is cleaner.
-# --button= lets us emit one button per action with distinct exit codes.
 bot_raise_dialog "Bitcoin on Tails — update available"
-yad --form --columns=1 --width=640 --height=460 \
+yad --form --columns=1 --width=640 --height=420 \
     --title="Bitcoin on Tails — update available" \
     --image="$ICON_FILE" --image-on-top \
     --field="<b>Update available.</b>:LBL" "" \
@@ -131,13 +152,21 @@ yad --form --columns=1 --width=640 --height=460 \
     --field="Latest published tag:RO"    "$latest_tag" \
     --field="Commits behind $remote/$default_branch:RO" "$behind" \
     --field=":LBL" "Pick how you want to update. BoT will not update automatically — you have to choose." \
-    --field="Upgrade:FBTN" "$cmd_auto_update" \
-    --field="<b>Or copy and paste one of these instead:</b>:LBL" "" \
+    --field="<b>Or copy and paste one of these manual commands instead:</b>:LBL" "" \
     --field="Fresh clone (replaces ~/bot):" "$manual_cmd_clone" \
     --field="In-place pull (working tree):" "$manual_cmd_pull" \
     --field="Verify tag signature first:"   "$manual_cmd_verify" \
     --field=":LBL" "Tip: click a field above, Ctrl+A to select all, then Ctrl+C to copy." \
+    --button="Upgrade now!gtk-go-up:42" \
     --button="gtk-close:0" \
     "$ICON_ARG"
+yad_rc=$?
+
+# Fire bot-update-now ONLY if the user chose Upgrade. setsid fully detaches
+# stdio + controlling terminal so bot-update-now (and the bot-menu it
+# eventually spawns) can't be SIGHUP'd by anything in this process tree.
+if [ "$yad_rc" = "42" ]; then
+    setsid bot-update-now </dev/null >/dev/null 2>&1 &
+fi
 
 exit 0

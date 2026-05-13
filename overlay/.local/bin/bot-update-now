@@ -2,20 +2,31 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Satoshi Coffee Co. — see LICENSE.
 #
-# bot-update-now — interactive auto-update for Bitcoin on Tails.
+# bot-update-now — silent auto-update for Bitcoin on Tails.
 #
-# Run from a terminal (typically spawned by the bot-check-update dialog's
-# "Auto-update now" button). Walks the user through:
-#   1. Confirming the update.
-#   2. Removing ~/bot if it exists (git clone refuses to clone into
-#      non-empty directories).
-#   3. Cloning the latest BoT main branch.
-#   4. Verifying the signed tag (best-effort — informational, doesn't block).
-#   5. Running ~/bot/b which detects the existing install and offers refresh.
+# Called by bot-check-update (and only by bot-check-update) when the user
+# clicks "Upgrade now" in the update-available dialog. The user already
+# consented by clicking that button, so this script no longer prompts
+# again — it shows a pulsating progress dialog during the clone/verify
+# step, then hands off to `b` with BOT_AUTO_REFRESH=1 set so b runs the
+# refresh path without showing the dev-choice dialog.
 #
-# This deliberately does NOT auto-pick "refresh" in the dev-choice dialog —
-# the user should still see what's about to happen. We just remove the
-# friction of remembering the rm + clone commands.
+# Design notes (don't undo without reading the v0.11.1-alpha update-flow
+# refactor in the ROADMAP):
+#
+#   - This script is invoked via `setsid bot-update-now </dev/null >/dev/null 2>&1 &`
+#     so it has no controlling terminal. Any output goes to /dev/null. All
+#     user-visible state must be conveyed via zenity dialogs.
+#
+#   - Previously this used `read -rp "Proceed? [y/N]"` inside a wrapping
+#     terminal. That created a cascade of stale windows (terminal stayed
+#     open with "press any key to close", killing it SIGHUP'd the new
+#     bot-menu the update launched). Removing the terminal + the prompt
+#     fixes that whole class of bugs.
+#
+#   - We set BOT_AUTO_REFRESH=1 before `exec b` so b auto-picks refresh
+#     instead of showing the three-option dev-choice dialog (which would
+#     stall the headless flow).
 
 set -u
 
@@ -23,73 +34,86 @@ CLONE_URL="${BOT_CLONE_URL:-https://github.com/satscoffee/bitcoin-on-tails}"
 CLONE_DIR="${BOT_CLONE_DIR:-$HOME/bot}"
 EXPECTED_FINGERPRINT="${BOT_GPG_FINGERPRINT:-2EE3 5C29 41D5 4C9E 9E2D  C908 33A3 9346 82DD 9E18}"
 
-bold() { printf '\033[1m%s\033[0m\n' "$*"; }
-green() { printf '\033[32m%s\033[0m\n' "$*"; }
-red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
-yellow(){ printf '\033[33m%s\033[0m\n' "$*"; }
+ICON_FILE="$HOME/.local/share/icons/bot128.png"
+ICON_ARG="--icon=$ICON_FILE"
 
-cat <<EOF
-$(bold "Bitcoin on Tails — auto-update")
+# Optional log file for forensics if something goes wrong mid-clone.
+# Nothing reads this — it exists so we can grep it from a terminal after
+# the fact if a user reports a stuck update.
+LOG_DIR="${XDG_STATE_HOME:-/live/persistence/TailsData_unlocked/dotfiles/.local/state}/bot"
+mkdir -p "$LOG_DIR" 2>/dev/null
+LOG="$LOG_DIR/bot-update-now.log"
+exec 3>>"$LOG" 2>&1 || true
+log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&3 2>/dev/null; }
 
-This will:
+log "=== bot-update-now starting ==="
+log "CLONE_URL=$CLONE_URL CLONE_DIR=$CLONE_DIR"
 
-  1. Remove $CLONE_DIR (if present)
-  2. git clone $CLONE_URL → $CLONE_DIR
-  3. (Best effort) verify the latest signed tag against the BoT key
-       $EXPECTED_FINGERPRINT
-  4. Run $CLONE_DIR/b — when it detects your existing install you'll
-     get the standard "refresh / menu / reinstall" dialog. Pick
-     "refresh" to apply scripts without redownloading Bitcoin.
+# ---- Progress dialog wraps the rm + clone -----------------------------------
+#
+# zenity --progress in pulsate mode shows a moving bar with no completion
+# estimate (we can't predict how long Tor + GitHub will take). It runs as
+# the foreground UI; we feed it status text via its stdin.
+#
+# The actual work runs in a subshell whose stdout drives zenity. When the
+# subshell exits, --auto-close dismisses the progress window.
 
-EOF
+(
+    echo "# Preparing..."
+    log "Preparing"
 
-read -rp "Proceed? [y/N] " ans
-case "${ans,,}" in
-    y|yes) ;;
-    *)
-        red "Cancelled."
-        exit 1
-        ;;
-esac
-
-if [ -e "$CLONE_DIR" ]; then
-    yellow "Removing existing $CLONE_DIR ..."
-    rm -rf "$CLONE_DIR" || {
-        red "Could not remove $CLONE_DIR. Check permissions."
-        exit 1
-    }
-fi
-
-yellow "Cloning $CLONE_URL → $CLONE_DIR ..."
-if ! git clone "$CLONE_URL" "$CLONE_DIR"; then
-    red "git clone failed. Check your network / Tor connection and try again."
-    exit 1
-fi
-
-# Best-effort tag verification. Informational only — we don't block on
-# failure because: (a) signing keys may not be in the user's keyring yet,
-# (b) the clone might be from a non-tagged commit ahead of the latest tag.
-cd "$CLONE_DIR" || exit 1
-latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
-if [ -n "$latest_tag" ]; then
-    yellow ""
-    yellow "Verifying tag $latest_tag against $EXPECTED_FINGERPRINT ..."
-    if git tag -v "$latest_tag" 2>&1 | grep -qE 'Good signature|using.*key'; then
-        green "Tag signature verified."
-    else
-        yellow "Tag signature could not be verified locally. This usually means"
-        yellow "the BoT signing key is not in your keyring yet — not a security"
-        yellow "issue if you trust the GitHub clone over Tor. To verify properly:"
-        yellow ""
-        yellow "  curl -s https://sats.coffee/2EE35C2941D54C9E9E2DC90833A3934682DD9E18.asc | gpg --import -"
-        yellow "  cd $CLONE_DIR && git tag -v $latest_tag"
-        yellow ""
+    if [ -e "$CLONE_DIR" ]; then
+        echo "# Removing previous install at $CLONE_DIR ..."
+        log "rm -rf $CLONE_DIR"
+        rm -rf "$CLONE_DIR" 2>&1 | while IFS= read -r line; do log "  rm: $line"; done
     fi
+
+    echo "# Cloning latest BoT from GitHub over Tor (this can take a minute)..."
+    log "git clone $CLONE_URL $CLONE_DIR"
+    if ! git clone --quiet "$CLONE_URL" "$CLONE_DIR" >&3 2>&1; then
+        log "git clone FAILED"
+        echo "100"
+        exit 11
+    fi
+
+    echo "# Verifying signed tag (best-effort)..."
+    log "verifying latest tag"
+    cd "$CLONE_DIR" || exit 12
+    latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
+    if [ -n "$latest_tag" ]; then
+        if git tag -v "$latest_tag" 2>&1 | grep -qE 'Good signature|using.*key'; then
+            log "tag $latest_tag signature OK"
+        else
+            log "tag $latest_tag signature could not be verified locally — informational only"
+        fi
+    fi
+
+    echo "# Applying scripts and starting refreshed control panel..."
+    log "handing off to b with BOT_AUTO_REFRESH=1"
+    echo "100"
+    exit 0
+) | zenity --progress --pulsate --auto-close --no-cancel \
+    --title="Bitcoin on Tails — updating" \
+    --text="Updating Bitcoin on Tails..." \
+    --width=480 "$ICON_ARG" --icon=bot128 2>/dev/null
+
+work_rc="${PIPESTATUS[0]}"
+log "subshell rc=$work_rc"
+
+# ---- Failure path -----------------------------------------------------------
+if [ "$work_rc" -ne 0 ]; then
+    zenity --error --title="Update failed" \
+        --text="The Bitcoin on Tails update did not complete (rc=$work_rc).\n\nThis is usually a Tor circuit problem during <tt>git clone</tt>. Try again in a moment, or update manually:\n\n<tt>rm -rf ~/bot \&amp;\&amp; git clone https://github.com/satscoffee/bitcoin-on-tails ~/bot \&amp;\&amp; ~/bot/b</tt>\n\nFull log: <tt>$LOG</tt>" \
+        --width=560 "$ICON_ARG" --icon=dialog-error 2>/dev/null
+    exit "$work_rc"
 fi
 
-yellow ""
-yellow "Launching $CLONE_DIR/b ..."
-yellow "(In the dev-choice dialog, pick 'refresh' to apply scripts.)"
-yellow ""
+# ---- Hand off to b ----------------------------------------------------------
+# BOT_AUTO_REFRESH=1 tells b's already-installed branch to skip the
+# refresh / menu / reinstall picker and run the refresh path directly.
+# b will rsync the overlay, kill any leftover bot-menu (M1), and launch a
+# fresh detached bot-menu (M2). See b's case "$dev_choice" branch.
 
+log "exec $CLONE_DIR/b"
+export BOT_AUTO_REFRESH=1
 exec "$CLONE_DIR/b"

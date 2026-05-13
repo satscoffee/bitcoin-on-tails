@@ -277,9 +277,10 @@ build_status_tab() {
     local btc_update sparrow_update
     btc_update="$(update_status_line "${dist:-core}")"
     sparrow_update="$(update_status_line sparrow)"
-    # "Check for BoT updates" — read-only check, no auto-install. Spawned in
-    # a terminal so the user sees git fetch's progress; the script itself
-    # pops a zenity dialog with the result.
+    # "Check for BoT updates" — read-only check, no auto-install.
+    # bot-check-update handles its own UI (zenity progress during git fetch,
+    # yad dialog with results). Backgrounded with stdio detached so this
+    # button doesn't open a terminal and doesn't leave a stale window after.
     local cmd_bot_check_update
 
     # Pre-compute sync status once; detect IBD < 95% to show drop-caches tip.
@@ -298,7 +299,7 @@ build_status_tab() {
             )
         fi
     fi
-    cmd_bot_check_update="$(mk_action 'BoT — checking for updates' 'bot-check-update')"
+    cmd_bot_check_update="setsid bot-check-update </dev/null >/dev/null 2>&1 &"
 
     yad --plug="$key" --tabnum=1 \
         --form --columns=1 \
@@ -596,11 +597,13 @@ build_utxoracle_tab() {
     cmd_consensus="$(mk_action 'BoT — UTXOracle Consensus Price' 'utxoracle')"
     cmd_block="$(mk_action 'BoT — UTXOracle Block Window Price' 'utxoracle -rb')"
     if [ -n "$last_html" ] && [ -s "$last_html" ]; then
-        # `unset WAYLAND_DISPLAY` because bot-menu exports it as empty string
-        # at the top of this script, which makes Tor Browser's Wayland Proxy
-        # attach to a null display and SIGTERM (exit 15). With it cleanly
-        # unset, Tor Browser falls back to the real session display.
-        cmd_show="($open_browser $(printf '%q' "$last_html")) >/dev/null 2>&1 &"
+        # Use `setsid -f` to fully detach the launcher from this shell, so
+        # Tor Browser gets its own session immediately and can't be
+        # SIGHUP'd by the dying ancestor chain after sh -c finishes. Same
+        # fix as the Apps tab RoboSats button — without this, Tor Browser
+        # sometimes silently fails to come up on cold start because xdg-
+        # open exits faster than Tor Browser can grab its child handles.
+        cmd_show="setsid -f $open_browser $(printf '%q' "$last_html") </dev/null >/dev/null 2>&1"
     else
         cmd_show="zenity --info --title='No chart yet' \
             --text='Run UTXOracle Consensus Price or UTXOracle Block Window Price first to generate a chart.' \
@@ -697,7 +700,14 @@ build_apps_tab() {
     # federation coordinator list. Swap to another active one.
     local robosats_url="http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion/"
     local cmd_robosats_open
-    cmd_robosats_open="($open_browser $(printf '%q' "$robosats_url")) >/dev/null 2>&1 &"
+    # Use `setsid -f` to fork the launcher into a new session immediately.
+    # Without this, the chain `sh -c "(xdg-open URL) &"` exits too fast for
+    # Tor Browser to grab its own session — the kernel SIGHUPs Tor Browser
+    # before its GUI is fully up, and the user sees nothing happen. setsid
+    # -f detaches in one syscall, so Tor Browser survives. The zenity
+    # --notification toast gives the user a visible signal that the click
+    # registered (Tor Browser can take 5-15s to appear on cold start).
+    cmd_robosats_open="zenity --notification --text='Opening RoboSats in Tor Browser…' $ICON_ARG 2>/dev/null; setsid -f $open_browser $(printf '%q' "$robosats_url") </dev/null >/dev/null 2>&1"
 
     yad --plug="$key" --tabnum=5 \
         --form --columns=1 \
