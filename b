@@ -7,7 +7,7 @@
 # and launches install-core or install-knots.
 ###############################################################################
 
-export VERSION='v0.11.1-alpha'
+export VERSION='v0.11.2-alpha'
 export ICON="--icon=$HOME/.local/share/icons/bot128.png"
 export DOTFILES='/live/persistence/TailsData_unlocked/dotfiles'
 readonly SECURITY_IN_A_BOX_URL="https://securityinabox.org/en/"

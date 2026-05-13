@@ -299,7 +299,7 @@ build_status_tab() {
             )
         fi
     fi
-    cmd_bot_check_update="setsid bot-check-update </dev/null >/dev/null 2>&1 &"
+    cmd_bot_check_update=$(mk_bg_action "setsid bot-check-update </dev/null >/dev/null 2>&1")
 
     yad --plug="$key" --tabnum=1 \
         --form --columns=1 \
@@ -347,6 +347,35 @@ mk_action() {
     # window-icon rendering.
     printf 'x-terminal-emulator -T %q -e bash -lc %q &' "$title" \
         "$cmd; echo; read -rsn 1 -p 'Press any key to close. ' _; echo"
+}
+
+###############################################################################
+# mk_bg_action CMD — produce an FBTN value that runs CMD silently in the
+# background (no terminal, no "press any key" prompt).
+#
+# Why this exists: yad's FBTN handler tokenizes the value via GLib's
+# g_shell_parse_argv and execvp's the resulting argv directly — it does
+# NOT shell out to /bin/sh. So semicolons, redirects (`>/dev/null`,
+# `2>&1`, `</dev/null`), and the background `&` are all treated as
+# LITERAL ARGUMENTS to the first command, not as shell metacharacters.
+# A raw FBTN value like `xdg-open URL >/dev/null 2>&1 &` becomes
+# `execvp("xdg-open", ["URL", ">/dev/null", "2>&1", "&"])` and either
+# fails silently or opens the wrong file. This bit us hard on the
+# RoboSats button in v0.11.1-alpha.
+#
+# Wrapping the command in `bash -c <quoted-script>` puts it back through
+# a shell where metacharacters work as expected — same shape mk_action
+# already uses for its terminal-wrapped variant. The `printf %q` quoting
+# is what yad's tokenizer expects.
+#
+# Use mk_bg_action for FBTNs that just launch a URL/file in the user's
+# browser, fire a notification, or kick off a daemon — anything where
+# the user doesn't need to see terminal output. For interactive scripts
+# that need a visible terminal, use mk_action.
+###############################################################################
+mk_bg_action() {
+    local cmd="$1"
+    printf 'bash -c %q' "$cmd"
 }
 
 build_bitcoin_tab() {
@@ -397,11 +426,11 @@ build_bitcoin_tab() {
     cmd_check="$(mk_action "BoT — checking $label" "install-$dist --check")"
     cmd_update="$(mk_action "BoT — updating $label" "install-$dist --update")"
     cmd_uninstall="$(mk_action "BoT — uninstalling $label" "install-$dist --uninstall")"
-    cmd_storage="bot-set-prune >/dev/null 2>&1 &"
-    cmd_network="bot-set-network >/dev/null 2>&1 &"
+    cmd_storage=$(mk_bg_action "bot-set-prune >/dev/null 2>&1 &")
+    cmd_network=$(mk_bg_action "bot-set-network >/dev/null 2>&1 &")
     cmd_switch="$(mk_action 'BoT — change implementation' 'bot-switch-impl')"
     if [ -n "$chg" ]; then
-        cmd_changelog="xdg-open $(printf '%q' "$chg") >/dev/null 2>&1 &"
+        cmd_changelog=$(mk_bg_action "xdg-open $(printf '%q' "$chg") >/dev/null 2>&1 &")
     else
         # Fall back to the dist's general releases page when no specific
         # changelog URL is cached yet — better UX than a "click Check first"
@@ -412,9 +441,9 @@ build_bitcoin_tab() {
             knots) fallback_releases="https://github.com/bitcoinknots/bitcoin/releases" ;;
         esac
         if [ -n "$fallback_releases" ]; then
-            cmd_changelog="xdg-open $(printf '%q' "$fallback_releases") >/dev/null 2>&1 &"
+            cmd_changelog=$(mk_bg_action "xdg-open $(printf '%q' "$fallback_releases") >/dev/null 2>&1 &")
         else
-            cmd_changelog="zenity --info --title='No release notes' --text='No changelog URL available.' --ellipsize $ICON_ARG &"
+            cmd_changelog=$(mk_bg_action "zenity --info --title='No release notes' --text='No changelog URL available.' --ellipsize $ICON_ARG &")
         fi
     fi
 
@@ -473,9 +502,9 @@ build_sparrow_tab() {
     cmd_update="$(mk_action 'BoT — updating Sparrow' 'install-sparrow --update')"
     cmd_uninstall="$(mk_action 'BoT — uninstalling Sparrow' 'install-sparrow --uninstall')"
     if [ -n "$chg" ]; then
-        cmd_changelog="xdg-open $(printf '%q' "$chg") >/dev/null 2>&1 &"
+        cmd_changelog=$(mk_bg_action "xdg-open $(printf '%q' "$chg") >/dev/null 2>&1 &")
     else
-        cmd_changelog="zenity --info --title='No release notes' --text='No changelog URL on file. Click Check for updates first.' --ellipsize $ICON_ARG &"
+        cmd_changelog=$(mk_bg_action "zenity --info --title='No release notes' --text='No changelog URL on file. Click Check for updates first.' --ellipsize $ICON_ARG &")
     fi
 
     if [ -x "$DOTFILES/.local/bin/Sparrow" ]; then
@@ -597,17 +626,13 @@ build_utxoracle_tab() {
     cmd_consensus="$(mk_action 'BoT — UTXOracle Consensus Price' 'utxoracle')"
     cmd_block="$(mk_action 'BoT — UTXOracle Block Window Price' 'utxoracle -rb')"
     if [ -n "$last_html" ] && [ -s "$last_html" ]; then
-        # Use `setsid -f` to fully detach the launcher from this shell, so
-        # Tor Browser gets its own session immediately and can't be
-        # SIGHUP'd by the dying ancestor chain after sh -c finishes. Same
-        # fix as the Apps tab RoboSats button — without this, Tor Browser
-        # sometimes silently fails to come up on cold start because xdg-
-        # open exits faster than Tor Browser can grab its child handles.
-        cmd_show="setsid -f $open_browser $(printf '%q' "$last_html") </dev/null >/dev/null 2>&1"
+        # Same fix as the Apps tab RoboSats button: wrap in mk_bg_action
+        # so `setsid -f` + redirects actually work (yad's FBTN doesn't
+        # shell out). Without this wrapper the redirects become literal
+        # args to xdg-open and Tor Browser silently fails to launch.
+        cmd_show=$(mk_bg_action "setsid -f $open_browser $(printf '%q' "$last_html") </dev/null >/dev/null 2>&1")
     else
-        cmd_show="zenity --info --title='No chart yet' \
-            --text='Run UTXOracle Consensus Price or UTXOracle Block Window Price first to generate a chart.' \
-            --ellipsize $ICON_ARG &"
+        cmd_show=$(mk_bg_action "zenity --info --title='No chart yet' --text='Run UTXOracle Consensus Price or UTXOracle Block Window Price first to generate a chart.' --ellipsize $ICON_ARG &")
     fi
     # Server controls — wrap in a terminal so users see start/stop output.
     # Single toggle button: label and action flip based on $server_running so
@@ -700,14 +725,16 @@ build_apps_tab() {
     # federation coordinator list. Swap to another active one.
     local robosats_url="http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion/"
     local cmd_robosats_open
-    # Use `setsid -f` to fork the launcher into a new session immediately.
-    # Without this, the chain `sh -c "(xdg-open URL) &"` exits too fast for
-    # Tor Browser to grab its own session — the kernel SIGHUPs Tor Browser
-    # before its GUI is fully up, and the user sees nothing happen. setsid
-    # -f detaches in one syscall, so Tor Browser survives. The zenity
-    # --notification toast gives the user a visible signal that the click
-    # registered (Tor Browser can take 5-15s to appear on cold start).
-    cmd_robosats_open="zenity --notification --text='Opening RoboSats in Tor Browser…' $ICON_ARG 2>/dev/null; setsid -f $open_browser $(printf '%q' "$robosats_url") </dev/null >/dev/null 2>&1"
+    # Compose the shell script we want to fire on click, then hand it to
+    # mk_bg_action so it gets wrapped in `bash -c <quoted>` for yad's
+    # tokenizer (which is NOT a shell — see mk_bg_action comment).
+    #
+    # `setsid -f` forks the launcher into a new session immediately so
+    # Tor Browser is immune to SIGHUP when the click handler exits.
+    # zenity --notification gives the user a visible signal that the
+    # click registered (Tor Browser cold start is 5-15s).
+    local _robosats_inner="zenity --notification --text='Opening RoboSats in Tor Browser...' $ICON_ARG 2>/dev/null; setsid -f $open_browser '$robosats_url' </dev/null >/dev/null 2>&1"
+    cmd_robosats_open="$(mk_bg_action "$_robosats_inner")"
 
     yad --plug="$key" --tabnum=5 \
         --form --columns=1 \
