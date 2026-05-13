@@ -684,12 +684,18 @@ build_apps_tab() {
     fi
 
     # --- RoboSats ---------------------------------------------------------
-    # Web-only — nothing to install. learn.robosats.org is the canonical
-    # entry point and lists every active federation coordinator; users pick
-    # which one to trade through. We deliberately do not hardcode a single
-    # coordinator onion here — coordinators come and go, the docs site has
-    # been stable since 2023 and surfaces the current list.
-    local robosats_url="https://learn.robosats.org/"
+    # Web-only — nothing to install. We target a federation coordinator
+    # directly via its .onion address rather than the clearnet docs site
+    # (learn.robosats.org). Reason: every BoT user is on Tor, and the
+    # clearnet RoboSats domains sit behind Cloudflare, which rate-limits or
+    # blocks a meaningful fraction of Tor exit nodes — observed in the
+    # field as connection timeouts. Onion routing skips the exit node, so
+    # the CF rate-limit doesn't apply.
+    #
+    # If this onion ever goes down: the RoboSats GitHub README
+    # (https://github.com/RoboSats/robosats) publishes the current
+    # federation coordinator list. Swap to another active one.
+    local robosats_url="http://ngdk7ocdzmz5kzsysa3om6du7ycj2evxp2f2olfkyq37htx3gllwp2yd.onion/"
     local cmd_robosats_open
     cmd_robosats_open="($open_browser $(printf '%q' "$robosats_url")) >/dev/null 2>&1 &"
 
@@ -697,8 +703,8 @@ build_apps_tab() {
         --form --columns=1 \
         --field=":LBL" "Optional sovereign-Bitcoin tools that complement your node. Web-only entries open in Tor Browser; installable entries appear here as they ship." \
         --field="<b>RoboSats — P2P Bitcoin trading</b>:LBL" "" \
-        --field=":LBL" "Buy and sell Bitcoin peer-to-peer over Tor and Lightning. No KYC, no account — escrow is held briefly by the coordinator you pick. RoboSats is a web app that runs in Tor Browser; nothing to install locally.\n\nThe button opens the federation landing page; pick a coordinator from there." \
-        --field="Status:RO" "Available (web service)" \
+        --field=":LBL" "Buy and sell Bitcoin peer-to-peer over Tor and Lightning. No KYC, no account — escrow is held briefly by the coordinator. RoboSats is a web app that runs in Tor Browser; nothing to install locally.\n\nThe button opens a RoboSats federation coordinator onion directly (skips Cloudflare-rate-limited clearnet)." \
+        --field="Status:RO" "Available (Tor hidden service)" \
         --field="Open RoboSats in Tor Browser:FBTN" "$cmd_robosats_open" &
 }
 

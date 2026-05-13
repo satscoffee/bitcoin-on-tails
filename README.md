@@ -79,7 +79,7 @@ Start it with `utxoracle-serve start` (or from the **UTXOracle Price** tab in `b
 
 Current entries:
 
-- **RoboSats** — peer-to-peer Bitcoin trading over Tor and Lightning. No KYC, no account; escrow is held briefly by the federation coordinator you pick. The Apps tab button opens `learn.robosats.org` in Tor Browser; you choose a coordinator from the federation list there.
+- **RoboSats** — peer-to-peer Bitcoin trading over Tor and Lightning. No KYC, no account; escrow is held briefly by the federation coordinator. The Apps tab button opens a RoboSats coordinator's `.onion` directly in Tor Browser. We point at an onion rather than clearnet because Cloudflare aggressively rate-limits Tor exit nodes on the clearnet RoboSats domains; routing via hidden service skips the exit. If the bundled onion goes down, the [RoboSats GitHub README](https://github.com/RoboSats/robosats) publishes the current federation list.
 
 More entries are planned for future releases (OpenTimestamps for sovereign timestamping against your own node, Boltz CLI for Lightning ↔ on-chain swaps without running an LN node).
 
